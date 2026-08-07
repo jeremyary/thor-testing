@@ -65,8 +65,7 @@ COPY config/nvidia-gpu-reset.service /usr/lib/systemd/system/nvidia-gpu-reset.se
 RUN chmod +x /usr/local/bin/nvidia-gpu-reset.sh && systemctl enable nvidia-gpu-reset.service
 
 # --- OpenTelemetry collector (RPM, runs as systemd service) ---
-RUN dnf install -y --setopt=install_weak_deps=False opentelemetry-collector \
-    && dnf clean all \
+RUN rpm -ivh https://mirror.stream.centos.org/10-stream/AppStream/aarch64/os/Packages/opentelemetry-collector-0.152.1-1.el10.aarch64.rpm \
     && mkdir -p /var/lib/otel-queue \
     && systemctl enable opentelemetry-collector.service
 COPY config/otel-collector.yaml /etc/opentelemetry-collector/config.yaml
