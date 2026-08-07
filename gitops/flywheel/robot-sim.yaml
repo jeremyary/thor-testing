@@ -14,6 +14,23 @@ data:
     EPISODE_DIR = pathlib.Path(os.environ.get("EPISODE_DIR", "/data/episodes/raw"))
     TICKS_PER_EPISODE = int(os.environ.get("TICKS_PER_EPISODE", "10"))
     FAILURE_RATE = float(os.environ.get("FAILURE_RATE", "0.3"))
+    OTEL_ENDPOINT = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318")
+
+    tracer = None
+    try:
+        from opentelemetry import trace
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.sdk.resources import Resource
+        resource = Resource.create({"service.name": "robot-sim", "model.version": "cosmos3-edge-v1"})
+        provider = TracerProvider(resource=resource)
+        provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=f"{OTEL_ENDPOINT}/v1/traces")))
+        trace.set_tracer_provider(provider)
+        tracer = trace.get_tracer("robot-sim")
+        print("[robot-sim] OTel tracing enabled", flush=True)
+    except ImportError:
+        print("[robot-sim] OTel SDK not available, tracing disabled", flush=True)
 
     SCENES = [
         "A mobile robot approaches a warehouse shelf with packages to pick.",
@@ -24,6 +41,7 @@ data:
     ]
 
     def call_reasoner(scene: str) -> dict:
+        span_ctx = tracer.start_span("inference") if tracer else None
         try:
             resp = requests.post(
                 f"{VLLM_URL}/v1/chat/completions",
@@ -39,15 +57,25 @@ data:
                 timeout=30,
             )
             resp.raise_for_status()
+            latency = resp.elapsed.total_seconds() * 1000
             content = resp.json()["choices"][0]["message"]["content"]
-            return {"raw_response": content, "latency_ms": resp.elapsed.total_seconds() * 1000}
+            if span_ctx:
+                span_ctx.set_attribute("inference.latency_ms", latency)
+                span_ctx.set_attribute("inference.model", "nvidia/Cosmos3-Edge")
+            return {"raw_response": content, "latency_ms": latency}
         except Exception as e:
+            if span_ctx:
+                span_ctx.set_attribute("inference.error", str(e))
             return {"raw_response": "", "error": str(e), "latency_ms": 0}
+        finally:
+            if span_ctx:
+                span_ctx.end()
 
     def run_episode() -> dict:
         episode_id = str(uuid.uuid4())[:12]
         scene = random.choice(SCENES)
         inject_failure = random.random() < FAILURE_RATE
+        episode_span = tracer.start_span("episode", attributes={"episode.id": episode_id, "episode.scene": scene}) if tracer else None
         ticks = []
 
         for tick in range(TICKS_PER_EPISODE):
@@ -83,6 +111,11 @@ data:
         EPISODE_DIR.mkdir(parents=True, exist_ok=True)
         path = EPISODE_DIR / f"{episode_id}.json"
         path.write_text(json.dumps(episode, indent=2))
+        if episode_span:
+            episode_span.set_attribute("episode.ticks", len(ticks))
+            episode_span.set_attribute("episode.avg_latency_ms", episode["avg_latency_ms"])
+            episode_span.set_attribute("episode.has_failure", episode["has_failure"])
+            episode_span.end()
         print(f"[robot-sim] Episode {episode_id}: {len(ticks)} ticks, avg {episode['avg_latency_ms']:.0f}ms, failure={episode['has_failure']}", flush=True)
         return episode
 
@@ -114,7 +147,7 @@ spec:
       containers:
         - name: robot-sim
           image: docker.io/library/python:3.12-slim
-          command: ["sh", "-c", "pip install -q requests && python /app/robot_sim.py"]
+          command: ["sh", "-c", "pip install -q requests opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http && python /app/robot_sim.py"]
           env:
             - name: VLLM_URL
               value: "http://cosmos3-edge.vllm.svc:8000"
