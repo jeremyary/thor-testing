@@ -1,0 +1,86 @@
+# This project was developed with assistance from AI tools.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: edge-kafka-config
+  namespace: flywheel
+data:
+  server.properties: |
+    node.id=1
+    process.roles=broker,controller
+    controller.quorum.voters=1@localhost:9093
+    listeners=PLAINTEXT://:9092,CONTROLLER://:9093
+    inter.broker.listener.name=PLAINTEXT
+    controller.listener.names=CONTROLLER
+    listener.security.protocol.map=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+    log.dirs=/var/lib/kafka/data
+    num.partitions=3
+    default.replication.factor=1
+    offsets.topic.replication.factor=1
+    transaction.state.log.replication.factor=1
+    transaction.state.log.min.isr=1
+    log.retention.hours=72
+    log.segment.bytes=104857600
+    log.retention.bytes=1073741824
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: edge-kafka
+  namespace: flywheel
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: edge-kafka
+  template:
+    metadata:
+      labels:
+        app: edge-kafka
+    spec:
+      containers:
+        - name: kafka
+          image: quay.io/strimzi/kafka:0.45.0-kafka-3.9.0
+          command:
+            - sh
+            - -c
+            - |
+              export KAFKA_CLUSTER_ID=$(bin/kafka-storage.sh random-uuid)
+              bin/kafka-storage.sh format -t $KAFKA_CLUSTER_ID -c /etc/kafka/server.properties --ignore-formatted
+              exec bin/kafka-server-start.sh /etc/kafka/server.properties
+          ports:
+            - containerPort: 9092
+              name: plaintext
+          volumeMounts:
+            - name: config
+              mountPath: /etc/kafka
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/kafka/data
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1536Mi
+      volumes:
+        - name: config
+          configMap:
+            name: edge-kafka-config
+        - name: data
+          hostPath:
+            path: /var/lib/edge-kafka
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: edge-kafka
+  namespace: flywheel
+spec:
+  selector:
+    app: edge-kafka
+  ports:
+    - name: plaintext
+      port: 9092
+      targetPort: 9092

@@ -36,13 +36,16 @@ data:
 
     def get_kafka_producer():
         from kafka import KafkaProducer
-        return KafkaProducer(
-            bootstrap_servers=KAFKA_BOOTSTRAP,
-            security_protocol="SSL",
-            ssl_check_hostname=False,
-            ssl_context=ssl._create_unverified_context(),
-            value_serializer=lambda v: json.dumps(v).encode(),
-        )
+        use_ssl = KAFKA_BOOTSTRAP.endswith(":443")
+        kwargs = {
+            "bootstrap_servers": KAFKA_BOOTSTRAP,
+            "value_serializer": lambda v: json.dumps(v).encode(),
+        }
+        if use_ssl:
+            kwargs["security_protocol"] = "SSL"
+            kwargs["ssl_check_hostname"] = False
+            kwargs["ssl_context"] = ssl._create_unverified_context()
+        return KafkaProducer(**kwargs)
 
     def upload_and_publish(s3, producer, path: pathlib.Path):
         episode = json.loads(path.read_text())
@@ -119,7 +122,7 @@ spec:
                   name: hub-credentials
                   key: s3-secret-key
             - name: KAFKA_BOOTSTRAP
-              value: "fleet-kafka-bootstrap-fleet-ops.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com:443"
+              value: "edge-kafka.flywheel.svc:9092"
             - name: KAFKA_TOPIC
               value: "episode-manifests"
           volumeMounts:

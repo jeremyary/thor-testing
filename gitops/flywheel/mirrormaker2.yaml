@@ -1,0 +1,80 @@
+# This project was developed with assistance from AI tools.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mm2-config
+  namespace: flywheel
+data:
+  mm2.properties: |
+    # Cluster aliases
+    clusters=edge,hub
+
+    # Edge Kafka (local)
+    edge.bootstrap.servers=edge-kafka.flywheel.svc:9092
+
+    # Hub Kafka (external route, TLS)
+    hub.bootstrap.servers=fleet-kafka-bootstrap-fleet-ops.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com:443
+    hub.security.protocol=SSL
+    hub.ssl.endpoint.identification.algorithm=
+
+    # Replication: edge -> hub only
+    edge->hub.enabled=true
+    hub->edge.enabled=false
+
+    # Topics to replicate
+    edge->hub.topics=episode-manifests
+
+    # Don't rename topics (strip the source prefix)
+    replication.policy.class=org.apache.kafka.connect.mirror.IdentityReplicationPolicy
+
+    # Replication config
+    offset-syncs.topic.replication.factor=1
+    heartbeats.topic.replication.factor=1
+    checkpoints.topic.replication.factor=1
+
+    # Consumer/producer tuning for edge
+    tasks.max=1
+    replication.factor=1
+    sync.topic.configs.enabled=false
+    sync.topic.acls.enabled=false
+    refresh.topics.interval.seconds=30
+    refresh.groups.interval.seconds=30
+    emit.heartbeats.interval.seconds=30
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mirrormaker2
+  namespace: flywheel
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: mirrormaker2
+  template:
+    metadata:
+      labels:
+        app: mirrormaker2
+    spec:
+      containers:
+        - name: mm2
+          image: quay.io/strimzi/kafka:0.45.0-kafka-3.9.0
+          command:
+            - sh
+            - -c
+            - exec bin/connect-mirror-maker.sh /etc/mm2/mm2.properties
+          volumeMounts:
+            - name: config
+              mountPath: /etc/mm2
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+      volumes:
+        - name: config
+          configMap:
+            name: mm2-config
