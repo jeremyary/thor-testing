@@ -6,49 +6,28 @@ metadata:
   namespace: flywheel
 data:
   curator.py: |
-    """On-device episode curator — scores episodes via Cosmos3-Edge Reasoner, passes or drops."""
-    import json, os, time, shutil, pathlib, requests
+    """On-device episode curator — scores episodes on measurable quality signals, passes or drops."""
+    import json, os, time, pathlib
 
-    VLLM_URL = os.environ.get("VLLM_URL", "http://cosmos3-edge.vllm.svc:8000")
     RAW_DIR = pathlib.Path(os.environ.get("RAW_DIR", "/data/episodes/raw"))
     CURATED_DIR = pathlib.Path(os.environ.get("CURATED_DIR", "/data/episodes/curated"))
     REJECTED_DIR = pathlib.Path(os.environ.get("REJECTED_DIR", "/data/episodes/rejected"))
-    SCORE_THRESHOLD = float(os.environ.get("SCORE_THRESHOLD", "0.5"))
+    LATENCY_BUDGET_MS = float(os.environ.get("LATENCY_BUDGET_MS", "8000"))
 
-    def score_episode(episode: dict) -> float:
-        summary = (
-            f"Episode with {episode['ticks']} ticks, avg latency {episode['avg_latency_ms']:.0f}ms, "
-            f"all within budget: {episode['all_within_budget']}, has failure: {episode['has_failure']}. "
-            f"Scene: {episode['scene']}"
-        )
-        try:
-            resp = requests.post(
-                f"{VLLM_URL}/v1/chat/completions",
-                json={
-                    "model": "nvidia/Cosmos3-Edge",
-                    "messages": [
-                        {"role": "system", "content": "You are a training data quality scorer. Rate the episode 0.0-1.0 for training value. Respond with ONLY a number."},
-                        {"role": "user", "content": summary},
-                    ],
-                    "max_tokens": 10,
-                    "temperature": 0.1,
-                },
-                timeout=30,
-            )
-            resp.raise_for_status()
-            text = resp.json()["choices"][0]["message"]["content"].strip()
-            for token in text.split():
-                try:
-                    return max(0.0, min(1.0, float(token)))
-                except ValueError:
-                    continue
-            return 0.5
-        except Exception as e:
-            print(f"[curator] Scoring failed: {e}", flush=True)
-            return 0.5
+    def score_episode(episode: dict) -> tuple[float, str]:
+        if episode.get("has_failure"):
+            return 0.0, "injected-failure"
+        if not episode.get("all_within_budget"):
+            avg = episode.get("avg_latency_ms", 0)
+            if avg > LATENCY_BUDGET_MS:
+                return 0.2, f"latency-exceeded ({avg:.0f}ms > {LATENCY_BUDGET_MS:.0f}ms)"
+        error_ticks = sum(1 for t in episode.get("tick_data", []) if t.get("action_result", {}).get("error"))
+        if error_ticks > 0:
+            return 0.1, f"inference-errors ({error_ticks}/{episode.get('ticks', 0)} ticks)"
+        return 1.0, "clean"
 
     if __name__ == "__main__":
-        print(f"[curator] Starting — threshold {SCORE_THRESHOLD}, watching {RAW_DIR}", flush=True)
+        print(f"[curator] Starting — latency budget {LATENCY_BUDGET_MS}ms, watching {RAW_DIR}", flush=True)
         CURATED_DIR.mkdir(parents=True, exist_ok=True)
         REJECTED_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -56,18 +35,20 @@ data:
             for path in sorted(RAW_DIR.glob("*.json")):
                 try:
                     episode = json.loads(path.read_text())
-                    score = score_episode(episode)
+                    score, reason = score_episode(episode)
                     episode["curation_score"] = round(score, 3)
-                    episode["curation_verdict"] = "pass" if score >= SCORE_THRESHOLD else "reject"
+                    episode["curation_reason"] = reason
 
-                    if score >= SCORE_THRESHOLD:
+                    if score >= 0.5:
+                        episode["curation_verdict"] = "pass"
                         dest = CURATED_DIR / path.name
                         dest.write_text(json.dumps(episode, indent=2))
-                        print(f"[curator] PASS {episode['episode_id']} score={score:.2f}", flush=True)
+                        print(f"[curator] PASS {episode['episode_id']} score={score:.2f} ({reason})", flush=True)
                     else:
+                        episode["curation_verdict"] = "reject"
                         dest = REJECTED_DIR / path.name
                         dest.write_text(json.dumps(episode, indent=2))
-                        print(f"[curator] REJECT {episode['episode_id']} score={score:.2f}", flush=True)
+                        print(f"[curator] REJECT {episode['episode_id']} score={score:.2f} ({reason})", flush=True)
 
                     path.unlink()
                 except Exception as e:
@@ -93,12 +74,10 @@ spec:
       containers:
         - name: curator
           image: docker.io/library/python:3.12-slim
-          command: ["sh", "-c", "pip install -q requests && python /app/curator.py"]
+          command: ["python", "/app/curator.py"]
           env:
-            - name: VLLM_URL
-              value: "http://cosmos3-edge.vllm.svc:8000"
-            - name: SCORE_THRESHOLD
-              value: "0.5"
+            - name: LATENCY_BUDGET_MS
+              value: "8000"
           volumeMounts:
             - name: code
               mountPath: /app
