@@ -13,7 +13,7 @@ This document captures every step needed to recreate the Physical AI Edge Flywhe
 - OpenShift Dedicated (OSD) cluster on AWS with cluster-admin access
 - SSH access to the Thor (`ssh root@thor`)
 - GitHub account with `gh` CLI authenticated
-- Quay.io account with a robot account for push access
+- Internal OpenShift registry (included with OSD)
 - GitLab read token for the base image registry
 
 ## 1. Derived Bootc Image (Phase 1)
@@ -455,7 +455,7 @@ spec:
   output:
     to:
       kind: DockerImage
-      name: quay.io/jary/thor-edge:latest
+      name: default-route-openshift-image-registry.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com/thor-builds/thor-edge:latest
     pushSecret:
       name: quay-push-secret
 ```
@@ -533,20 +533,20 @@ Sign an image (with Rekor transparency logging):
 COSIGN_PASSWORD="" cosign sign --key=thor-signing.key \
   --rekor-url=$REKOR_URL \
   --tlog-upload=true \
-  -y quay.io/jary/thor-edge:latest
+  -y default-route-openshift-image-registry.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com/thor-builds/thor-edge:latest
 ```
 
 ### 9.4 Device-Side Policy
 
 Three files deployed to Thor (baked into the derived image):
 
-**`/etc/containers/policy.json`** — enforces sigstoreSigned for quay.io/jary:
+**`/etc/containers/policy.json`** — enforces sigstoreSigned for internal-registry/thor-builds:
 ```json
 {
   "default": [{"type": "insecureAcceptAnything"}],
   "transports": {
     "docker": {
-      "quay.io/jary": [{
+      "internal-registry/thor-builds": [{
         "type": "sigstoreSigned",
         "keyPath": "/etc/pki/containers/cosign-signing.pub",
         "signedIdentity": {"type": "matchRepository"}
@@ -561,7 +561,7 @@ Three files deployed to Thor (baked into the derived image):
 **`/etc/containers/registries.d/quay-jary.yaml`** — enables sigstore attachment discovery:
 ```yaml
 docker:
-  quay.io/jary:
+  internal-registry/thor-builds:
     use-sigstore-attachments: true
 ```
 
@@ -569,12 +569,12 @@ docker:
 
 Positive test (signed image should pull):
 ```bash
-podman pull quay.io/jary/thor-edge:latest  # should succeed
+podman pull default-route-openshift-image-registry.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com/thor-builds/thor-edge:latest  # should succeed
 ```
 
 Negative test (unsigned tag should be refused):
 ```bash
-podman pull quay.io/jary/thor-edge:unsigned  # should fail with policy violation
+podman pull default-route-openshift-image-registry.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com/thor-builds/thor-edge:unsigned  # should fail with policy violation
 ```
 
 ## 10. Telemetry (Phase 6)
@@ -669,7 +669,7 @@ Installed as an RPM in the bootc image (see Section 1.5). Config at `/etc/opente
 
 - **Connected mode**: telemetry flows to hub in real-time via OTLP/HTTP route
 - **Disconnected mode**: `file_storage` extension spools to `/var/lib/otel-queue` on NVMe, `max_elapsed_time: 0` retries indefinitely, drains automatically when connectivity returns
-- **Resource attributes**: `device.id`, `device.type`, `model.version` stamped on all signals for Grafana filtering
+- **Resource attributes**: `device.id`, `device.type`, `model.version` stamped on all signals for Perses/console filtering
 
 ### 10.5 Disconnect Tolerance Test
 
@@ -683,12 +683,12 @@ oc scale deployment robot-sim curator -n flywheel --replicas=1
 # After some episodes, restore connectivity
 ip link set enP2p1s0 up
 
-# Watch the backfill in the hub's Tempo UI / Grafana
+# Watch the backfill in the hub's Tempo UI / Perses
 ```
 
 ### 10.6 Visualization
 
-COO provides OpenShift console UI plugins for distributed tracing and log correlation. The Tempo query frontend route provides a Jaeger-compatible UI for trace exploration. For custom dashboards, the community Grafana operator is available on OperatorHub (not RH-supported).
+COO provides OpenShift console UI plugins for distributed tracing and log correlation. The Tempo query frontend route provides a Jaeger-compatible UI for trace exploration. For custom dashboards, the Perses (GA in COO 1.5) provides console-integrated dashboards via PersesDashboard CRs. COO UIPlugins add distributed tracing and logging views.
 
 ## 11. Decision Log
 
@@ -703,7 +703,7 @@ COO provides OpenShift console UI plugins for distributed tracing and log correl
 | Arm64 builds | OpenShift BuildConfig + qemu-user-static | No Graviton machinepools on OSD; RHEM ImageBuild API only injects flightctl-agent |
 | Flywheel default | replicas: 0 | GPU coil whine during continuous inference; scale up manually for testing/demo |
 | Image signing | Static cosign keypair + RHTAS Rekor | Full keyless needs OIDC client registration; static keys prove the same trust mechanics with Rekor transparency |
-| Trust enforcement | sigstoreSigned in policy.json | CRI-O and bootc both respect containers-policy.json; unsigned images from quay.io/jary refused |
+| Trust enforcement | sigstoreSigned in policy.json | CRI-O and bootc both respect containers-policy.json; unsigned images from internal-registry/thor-builds refused |
 | Air-gapped images | Embedded in bootc via skopeo + systemd loader | Red Hat's documented MicroShift disconnected pattern; no device-side registry needed |
 | OTel collector | RPM systemd service (not container) | Upstream contrib container fails on arm64; RPM gives host-level access to journald/GPU telemetry |
 | Build output | Internal OpenShift registry | Hub-side source of truth; devices receive images embedded in bootc, not pulled from external registry |

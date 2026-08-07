@@ -5,7 +5,7 @@
 > [!NOTE]
 > This project was developed with assistance from AI tools.
 
-~15-minute demo. Two screens: hub console/Grafana (left), Thor terminal + output (right). Thor on the table with power meter inline.
+~15-minute demo. Two screens: hub console/Perses (left), Thor terminal + output (right). Thor on the table with power meter inline.
 
 ## Pre-Demo Checklist
 
@@ -156,7 +156,7 @@ Show RHTAS:
 Show device policy:
 ```bash
 ssh root@thor "cat /etc/containers/policy.json"
-# Show sigstoreSigned enforcement for quay.io/jary
+# Show sigstoreSigned enforcement for internal-registry
 ```
 
 ### 3.2 Telemetry
