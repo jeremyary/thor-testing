@@ -64,6 +64,13 @@ COPY config/nvidia-gpu-reset.sh /usr/local/bin/nvidia-gpu-reset.sh
 COPY config/nvidia-gpu-reset.service /usr/lib/systemd/system/nvidia-gpu-reset.service
 RUN chmod +x /usr/local/bin/nvidia-gpu-reset.sh && systemctl enable nvidia-gpu-reset.service
 
+# --- OpenTelemetry collector (RPM, runs as systemd service) ---
+RUN dnf install -y --setopt=install_weak_deps=False opentelemetry-collector \
+    && dnf clean all \
+    && mkdir -p /var/lib/otel-queue \
+    && systemctl enable opentelemetry-collector.service
+COPY config/otel-collector.yaml /etc/opentelemetry-collector/config.yaml
+
 # --- Mask bootc auto-update timer (RHEM owns OS updates) ---
 RUN systemctl mask bootc-fetch-apply-updates.timer bootc-fetch-apply-updates.service
 
