@@ -446,7 +446,113 @@ oc secrets link builder quay-push-secret gitlab-pull-secret
 
 Trigger a build: `oc start-build thor-edge-image -n thor-builds`
 
-## 9. Decision Log
+## 9. Trust Plane — RHTAS (Phase 5)
+
+### 9.1 RHTAS Operator
+
+Install from OperatorHub: "Red Hat Trusted Artifact Signer" (stable channel). May require manual InstallPlan approval on OSD.
+
+### 9.2 Securesign CR
+
+```yaml
+apiVersion: rhtas.redhat.com/v1alpha1
+kind: Securesign
+metadata:
+  name: securesign
+  namespace: trusted-artifact-signer
+spec:
+  fulcio:
+    certificate:
+      commonName: fulcio.thor-testing
+      organizationName: thor-testing
+      organizationEmail: jary@redhat.com
+    config:
+      OIDCIssuers:
+        - Issuer: "https://oauth-openshift.apps.<cluster>"
+          IssuerURL: "https://oauth-openshift.apps.<cluster>"
+          ClientID: sigstore
+          Type: email
+    externalAccess:
+      enabled: true
+  rekor:
+    externalAccess:
+      enabled: true
+  trillian:
+    database:
+      create: true
+  ctlog:
+    prefix: trusted-artifact-signer
+  tuf:
+    externalAccess:
+      enabled: true
+    keys:
+      - name: rekor.pub
+      - name: ctfe.pub
+      - name: fulcio_v1.crt.pem
+```
+
+Note: explicitly list TUF keys without `tsa.certchain.pem` — TSA is not configured, and TUF will hang on "Resolving keys" if it expects one.
+
+### 9.3 Cosign Signing
+
+Generate a keypair and initialize cosign with TUF root:
+
+```bash
+cosign generate-key-pair --output-key-prefix=thor-signing
+cosign initialize --mirror=$TUF_URL --root=$TUF_URL/root.json
+```
+
+Sign an image (with Rekor transparency logging):
+
+```bash
+COSIGN_PASSWORD="" cosign sign --key=thor-signing.key \
+  --rekor-url=$REKOR_URL \
+  --tlog-upload=true \
+  -y quay.io/jary/thor-edge:latest
+```
+
+### 9.4 Device-Side Policy
+
+Three files deployed to Thor (baked into the derived image):
+
+**`/etc/containers/policy.json`** — enforces sigstoreSigned for quay.io/jary:
+```json
+{
+  "default": [{"type": "insecureAcceptAnything"}],
+  "transports": {
+    "docker": {
+      "quay.io/jary": [{
+        "type": "sigstoreSigned",
+        "keyPath": "/etc/pki/containers/cosign-signing.pub",
+        "signedIdentity": {"type": "matchRepository"}
+      }]
+    }
+  }
+}
+```
+
+**`/etc/pki/containers/cosign-signing.pub`** — the cosign public key.
+
+**`/etc/containers/registries.d/quay-jary.yaml`** — enables sigstore attachment discovery:
+```yaml
+docker:
+  quay.io/jary:
+    use-sigstore-attachments: true
+```
+
+### 9.5 Verification Tests
+
+Positive test (signed image should pull):
+```bash
+podman pull quay.io/jary/thor-edge:latest  # should succeed
+```
+
+Negative test (unsigned tag should be refused):
+```bash
+podman pull quay.io/jary/thor-edge:unsigned  # should fail with policy violation
+```
+
+## 10. Decision Log
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
@@ -458,3 +564,5 @@ Trigger a build: `oc start-build thor-edge-image -n thor-builds`
 | Argo delivery | ACM cluster-proxy (push via tunnel) | Zero inbound connections; cluster-proxy tunnel is outbound from Thor |
 | Arm64 builds | OpenShift BuildConfig + qemu-user-static | No Graviton machinepools on OSD; RHEM ImageBuild API only injects flightctl-agent |
 | Flywheel default | replicas: 0 | GPU coil whine during continuous inference; scale up manually for testing/demo |
+| Image signing | Static cosign keypair + RHTAS Rekor | Full keyless needs OIDC client registration; static keys prove the same trust mechanics with Rekor transparency |
+| Trust enforcement | sigstoreSigned in policy.json | CRI-O and bootc both respect containers-policy.json; unsigned images from quay.io/jary refused |

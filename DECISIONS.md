@@ -33,3 +33,45 @@ passthrough. Standalone spawned processes can see the GPU; the issue is specific
 vLLM's parent-process CUDA init poisoning child state. Running in-process avoids it.
 **Risk:** Performance impact from no async engine core. Acceptable for edge single-model
 serving.
+
+## D004: NVIDIA device plugin envvar strategy (not CDI, not GPU Operator)
+
+**Date:** 2026-08-06
+**Decision:** Use k8s-device-plugin DaemonSet with `DEVICE_LIST_STRATEGY=envvar`, not the GPU Operator or CDI mode.
+**Rationale:** Jetson doesn't support the CDI device-list mode ("CDI options are only supported on NVML-based systems"). GPU Operator is too heavy for MicroShift. Envvar strategy + hostPath mounts for `/usr/lib64/nvidia` is the working path.
+**Fallback:** None needed — this is the NVIDIA-documented approach for Jetson + K8s.
+
+## D005: RHEM org-admin role workaround (flightctl v1.1.0 bug)
+
+**Date:** 2026-08-06
+**Decision:** Use `flightctl-org-admin-flightctl` ClusterRole instead of `flightctl-admin-flightctl` for per-org RBAC.
+**Rationale:** flightctl v1.1.0 `BuildReportedOrganizations()` silently drops `flightctl-admin` from per-org RoleBindings — it's treated as global-only, requiring `system:cluster-admins` group. OSD uses `cluster-admins` (different group). The `org-admin` role isn't filtered out.
+**Risk:** Bug may be fixed in flightctl v1.2+. Remove workaround when upgrading.
+
+## D006: Heuristic curation instead of model-based scoring
+
+**Date:** 2026-08-07
+**Decision:** On-device episode curator uses heuristic quality signals (failure flag, latency budget, inference errors) rather than LLM-based scoring.
+**Rationale:** Cosmos3-Edge in omni mode treats all /v1/chat/completions requests as diffusion — text-only scoring is impossible without a separate Reasoner container (which would double GPU memory). Heuristic curation matches standard robotics on-device patterns.
+**Fallback:** Deploy a separate Reasoner instance (no `--omni`) if memory budget allows.
+
+## D007: Argo CD push via ACM cluster-proxy (not pull model)
+
+**Date:** 2026-08-07
+**Decision:** Use ACM cluster-proxy tunnel for Argo → Thor workload delivery, not the Argo pull-model agent.
+**Rationale:** The cluster-proxy addon is already running on Thor for ACM management. It provides outbound-only connectivity (Thor → hub tunnel) that Argo syncs through. Achieves zero inbound connections without deploying a separate Argo agent on MicroShift.
+**Risk:** Depends on ACM cluster-proxy stability. Brief preferred pull model but proxy achieves the same connectivity posture.
+
+## D008: Static cosign keypair with RHTAS Rekor (not full keyless)
+
+**Date:** 2026-08-07
+**Decision:** Sign images with a static cosign keypair, upload signatures to RHTAS Rekor for transparency logging. Device verifies via public key in policy.json.
+**Rationale:** Full keyless signing requires an OIDC client registered with OSD's OAuth server and browser-based auth flow. Static keys demonstrate the same trust mechanics (signed admits, unsigned refuses) while keeping Rekor entries for auditability. RHTAS is installed and running for the full infrastructure story.
+**Fallback:** Upgrade to keyless when OIDC client registration is configured.
+
+## D009: qemu-user-static cross-build for arm64 images
+
+**Date:** 2026-08-07
+**Decision:** Cross-build arm64 bootc images on x86 OSD nodes via qemu-user-static DaemonSet + OpenShift BuildConfig.
+**Rationale:** No Graviton machinepools available on OSD. RHEM's ImageBuild API only injects flightctl-agent (can't handle custom Containerfiles). Mac builds work but are laptop-bound. qemu emulation on x86 is slower but fully automated and cluster-native.
+**Fallback:** AWS CodeBuild arm64 fleet or ephemeral Graviton spot instances.
