@@ -16,6 +16,8 @@ data:
     hub.bootstrap.servers=fleet-kafka-bootstrap-fleet-ops.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com:443
     hub.security.protocol=SSL
     hub.ssl.endpoint.identification.algorithm=
+    hub.ssl.truststore.type=PEM
+    hub.ssl.truststore.certificates=/certs/ca.crt
 
     # Replication: edge -> hub only
     edge->hub.enabled=true
@@ -67,6 +69,9 @@ spec:
             - name: config
               mountPath: /etc/mm2
               readOnly: true
+            - name: hub-ca
+              mountPath: /certs
+              readOnly: true
           resources:
             requests:
               cpu: 100m
@@ -78,3 +83,6 @@ spec:
         - name: config
           configMap:
             name: mm2-config
+        - name: hub-ca
+          secret:
+            secretName: hub-kafka-ca
