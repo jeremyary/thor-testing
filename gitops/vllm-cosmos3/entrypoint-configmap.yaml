@@ -1,0 +1,29 @@
+# This project was developed with assistance from AI tools.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cosmos3-script
+  namespace: vllm
+data:
+  entrypoint.sh: |
+    #!/bin/bash
+    set -e
+    pip install --upgrade transformers -q 2>&1 | tail -1
+
+    exec python3 -u -c "
+    import torch
+    torch.zeros(1, device='cuda')
+    print('CUDA pre-init OK', flush=True)
+
+    import sys
+    sys.argv = [
+        'vllm', 'serve', 'nvidia/Cosmos3-Edge', '--omni',
+        '--host', '0.0.0.0', '--port', '8000',
+        '--enforce-eager', '--gpu-memory-utilization', '0.5',
+        '--max-model-len', '4096', '--init-timeout', '1800',
+        '--trust-remote-code',
+    ]
+
+    from vllm.scripts import main
+    main()
+    "

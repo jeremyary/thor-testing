@@ -1,0 +1,64 @@
+# This project was developed with assistance from AI tools.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cosmos3-edge
+  namespace: vllm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cosmos3-edge
+  template:
+    metadata:
+      labels:
+        app: cosmos3-edge
+    spec:
+      containers:
+        - name: cosmos3
+          image: docker.io/vllm/vllm-omni:cosmos3
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "/scripts/entrypoint.sh"]
+          ports:
+            - containerPort: 8000
+          env:
+            - name: LD_LIBRARY_PATH
+              value: /usr/lib64/nvidia:/usr/lib64:/usr/local/cuda/lib64
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: compute,utility
+            - name: VLLM_ENABLE_V1_MULTIPROCESSING
+              value: "0"
+            - name: CUDA_VISIBLE_DEVICES
+              value: "0"
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-credentials
+                  key: token
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: nvidia-libs
+              mountPath: /usr/lib64/nvidia
+              readOnly: true
+            - name: hf-cache
+              mountPath: /root/.cache/huggingface
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+      volumes:
+        - name: nvidia-libs
+          hostPath:
+            path: /usr/lib64/nvidia
+        - name: hf-cache
+          hostPath:
+            path: /var/lib/models/huggingface
+        - name: scripts
+          configMap:
+            name: cosmos3-script
+            defaultMode: 0755

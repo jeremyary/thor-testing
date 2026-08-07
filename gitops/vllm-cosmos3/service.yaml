@@ -1,0 +1,14 @@
+# This project was developed with assistance from AI tools.
+apiVersion: v1
+kind: Service
+metadata:
+  name: cosmos3-edge
+  namespace: vllm
+spec:
+  type: NodePort
+  selector:
+    app: cosmos3-edge
+  ports:
+    - port: 8000
+      targetPort: 8000
+      nodePort: 30800
