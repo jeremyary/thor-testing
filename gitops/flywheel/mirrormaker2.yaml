@@ -58,9 +58,13 @@ spec:
       labels:
         app: mirrormaker2
     spec:
+      securityContext:
+        runAsUser: 0
       containers:
         - name: mm2
           image: quay.io/strimzi/kafka:0.45.0-kafka-3.9.0
+          securityContext:
+            privileged: true
           command:
             - sh
             - -c
