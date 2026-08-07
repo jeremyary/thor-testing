@@ -1,0 +1,10 @@
+# This project was developed with assistance from AI tools.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: edge-smoke-test
+  namespace: edge-demo
+data:
+  deployed-by: argocd-via-acm
+  cluster: thor
+  message: "GitOps delivery working — this was deployed via Argo CD through the ACM cluster-proxy tunnel"

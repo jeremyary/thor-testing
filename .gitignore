@@ -1,0 +1,8 @@
+*.key
+*.csr
+*.srl
+/nvidia-jetson-sidecar/
+/centos-bootc-tegra/
+__pycache__/
+*.pyc
+.env

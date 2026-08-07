@@ -1,0 +1,13 @@
+[Unit]
+Description=Reset NVIDIA GPU for compute (Thor GCx workaround)
+After=nv-load-display-modules.service
+Before=crio.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 5
+ExecStart=/usr/local/bin/nvidia-gpu-reset.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

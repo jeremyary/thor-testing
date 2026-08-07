@@ -1,0 +1,4 @@
+dns:
+  baseDomain: thor.local
+node:
+  hostnameOverride: "thor"

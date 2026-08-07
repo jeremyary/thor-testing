@@ -1,0 +1,96 @@
+# This project was developed with assistance from AI tools.
+#
+# Derived bootc image for NVIDIA Jetson AGX Thor
+# Adds MicroShift, flightctl-agent, greenboot, and workload plumbing
+# to the sidecar team's CentOS Stream 10 Thor image.
+#
+# Build: podman build --platform linux/arm64 -t quay.io/jary/thor-edge:latest .
+# Deploy: bootc switch --transport registry quay.io/jary/thor-edge:latest
+
+ARG BASE_IMAGE=registry.gitlab.com/redhat/rhel/sst/orin-sidecar/nvidia-jetson-sidecar/rhel-stream10:a66617e5-thor
+
+FROM ${BASE_IMAGE}
+
+# --- OVS runtime dependencies (el9 OVS needs libs not in CS10 base) ---
+# unbound-libs not in the base image repos — install from CentOS Stream 10 mirror
+RUN rpm -ivh https://mirror.stream.centos.org/10-stream/BaseOS/aarch64/os/Packages/unbound-libs-1.25.1-1.el10.aarch64.rpm
+
+# --- MicroShift repo (el9 mirror with full repodata) ---
+RUN cat > /etc/yum.repos.d/microshift-4.22.repo << 'REPO'
+[microshift-4.22]
+name=MicroShift 4.22
+baseurl=https://mirror.openshift.com/pub/openshift-v4/aarch64/microshift/ocp/latest-4.22/el9/os
+enabled=1
+gpgcheck=0
+sslverify=1
+REPO
+
+# --- flightctl repo ---
+RUN curl -fsSL -o /etc/yum.repos.d/flightctl.repo \
+    https://rpm.flightctl.io/flightctl-epel10.repo
+
+# --- Install everything in one transaction ---
+# MicroShift core from the el9 mirror (nodeps for el9/el10 cross)
+# flightctl-agent + greenboot from flightctl repo
+# Skip microshift-networking (requires OVN/subscription packages)
+RUN cd /tmp && \
+    MS_BASE="https://mirror.openshift.com/pub/openshift-v4/aarch64/microshift/ocp/latest-4.22/el9/os/Packages" && \
+    MS_A="${MS_BASE}/microshift-4.22.0~rc.5-202605271558.p0.g853f977.assembly.rc.5.el9__aarch64" && \
+    MS_N="${MS_BASE}/microshift-4.22.0~rc.5-202605271558.p0.g853f977.assembly.rc.5.el9__noarch" && \
+    curl -fsSLO "${MS_A}/microshift-4.22.0~rc.5-202605271558.p0.g853f977.assembly.rc.5.el9.aarch64.rpm" && \
+    curl -fsSLO "${MS_N}/microshift-selinux-4.22.0~rc.5-202605271558.p0.g853f977.assembly.rc.5.el9.noarch.rpm" && \
+    curl -fsSLO "${MS_N}/microshift-release-info-4.22.0~rc.5-202605271558.p0.g853f977.assembly.rc.5.el9.noarch.rpm" && \
+    rpm -ivh --nodeps /tmp/microshift-*.rpm && \
+    rm -f /tmp/microshift-*.rpm && \
+    systemctl enable microshift.service
+
+# --- flightctl-agent ---
+RUN dnf install -y --setopt=install_weak_deps=False \
+        flightctl-agent \
+    && dnf clean all \
+    && systemctl enable flightctl-agent.service
+
+# --- CRI-O 1.35, cri-tools, OVS 3.5, networking (from OCP deps mirror) ---
+ARG OCP_DEPS=https://mirror.openshift.com/pub/openshift-v4/aarch64/dependencies/rpms/4.22-el9-beta
+RUN cd /tmp && \
+    curl -fsSLO "${OCP_DEPS}/cri-o-1.35.5-3.rhaos4.22.git0adf62b.el9.aarch64.rpm" && \
+    curl -fsSLO "${OCP_DEPS}/cri-tools-1.35.0-2.el9.aarch64.rpm" && \
+    curl -fsSLO "${OCP_DEPS}/openvswitch3.5-3.5.2-72.el9fdp.2.aarch64.rpm" && \
+    curl -fsSLO "https://mirror.openshift.com/pub/openshift-v4/aarch64/microshift/ocp/latest-4.22/el9/os/Packages/microshift-4.22.0~rc.5-202605271558.p0.g853f977.assembly.rc.5.el9__aarch64/microshift-networking-4.22.0~rc.5-202605271558.p0.g853f977.assembly.rc.5.el9.aarch64.rpm" && \
+    rpm -ivh --nodeps /tmp/cri-o-*.rpm /tmp/cri-tools-*.rpm /tmp/openvswitch3.5-*.rpm /tmp/microshift-networking-*.rpm && \
+    rm -f /tmp/*.rpm && \
+    systemctl enable crio.service openvswitch.service
+
+# --- oc CLI ---
+RUN curl -fsSL "https://mirror.openshift.com/pub/openshift-v4/aarch64/clients/ocp/stable-4.22/openshift-client-linux-arm64-rhel9-4.22.8.tar.gz" | \
+    tar xzf - -C /usr/local/bin oc kubectl && \
+    chmod +x /usr/local/bin/oc /usr/local/bin/kubectl
+
+# --- GPU reset service (Thor GCx workaround — GPU needs module reload after boot) ---
+COPY config/nvidia-gpu-reset.sh /usr/local/bin/nvidia-gpu-reset.sh
+COPY config/nvidia-gpu-reset.service /usr/lib/systemd/system/nvidia-gpu-reset.service
+RUN chmod +x /usr/local/bin/nvidia-gpu-reset.sh && systemctl enable nvidia-gpu-reset.service
+
+# --- Mask bootc auto-update timer (RHEM owns OS updates) ---
+RUN systemctl mask bootc-fetch-apply-updates.timer bootc-fetch-apply-updates.service
+
+# --- Persistent directories for workload data (survive bootc switch) ---
+RUN mkdir -p /var/lib/models /var/lib/episodes /var/lib/checkpoints \
+    && chmod 775 /var/lib/models /var/lib/episodes /var/lib/checkpoints
+
+# --- Greenboot health checks ---
+COPY greenboot/40_microshift.sh /etc/greenboot/check/required.d/40_microshift_running.sh
+COPY greenboot/40_vllm_gpu.sh /etc/greenboot/check/required.d/40_vllm_gpu.sh
+RUN chmod +x /etc/greenboot/check/required.d/40_microshift_running.sh \
+             /etc/greenboot/check/required.d/40_vllm_gpu.sh
+
+# --- Sigstore policy placeholder (permissive — tightened in Phase 5) ---
+COPY config/policy.json /etc/containers/policy.json
+
+# --- MicroShift configuration ---
+RUN mkdir -p /etc/microshift
+COPY config/microshift-config.yaml /etc/microshift/config.yaml
+
+# --- Day-0 manifest directory ---
+RUN mkdir -p /etc/microshift/manifests
+COPY manifests/ /etc/microshift/manifests/

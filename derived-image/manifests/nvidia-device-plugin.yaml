@@ -1,0 +1,46 @@
+# This project was developed with assistance from AI tools.
+# NVIDIA device plugin for MicroShift on Jetson AGX Thor
+# Advertises nvidia.com/gpu resources to the kubelet via CDI
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-device-plugin
+  namespace: kube-system
+  labels:
+    app: nvidia-device-plugin
+spec:
+  selector:
+    matchLabels:
+      app: nvidia-device-plugin
+  template:
+    metadata:
+      labels:
+        app: nvidia-device-plugin
+    spec:
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: nvidia-device-plugin
+          image: nvcr.io/nvidia/k8s-device-plugin:v0.17.1
+          securityContext:
+            privileged: true
+          env:
+            - name: DEVICE_LIST_STRATEGY
+              value: "envvar"
+            - name: DEVICE_ID_STRATEGY
+              value: "index"
+          volumeMounts:
+            - name: device-plugin
+              mountPath: /var/lib/kubelet/device-plugins
+            - name: cdi
+              mountPath: /etc/cdi
+              readOnly: true
+      volumes:
+        - name: device-plugin
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+        - name: cdi
+          hostPath:
+            path: /etc/cdi
