@@ -8,3 +8,5 @@ data:
   deployed-by: argocd-via-acm
   cluster: thor
   message: "GitOps delivery working — this was deployed via Argo CD through the ACM cluster-proxy tunnel"
+  verified: "2026-08-07T10:40Z"
+  phase: "2-complete"
