@@ -1,0 +1,114 @@
+# This project was developed with assistance from AI tools.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: curator-code
+  namespace: flywheel
+data:
+  curator.py: |
+    """On-device episode curator — scores episodes via Cosmos3-Edge Reasoner, passes or drops."""
+    import json, os, time, shutil, pathlib, requests
+
+    VLLM_URL = os.environ.get("VLLM_URL", "http://cosmos3-edge.vllm.svc:8000")
+    RAW_DIR = pathlib.Path(os.environ.get("RAW_DIR", "/data/episodes/raw"))
+    CURATED_DIR = pathlib.Path(os.environ.get("CURATED_DIR", "/data/episodes/curated"))
+    REJECTED_DIR = pathlib.Path(os.environ.get("REJECTED_DIR", "/data/episodes/rejected"))
+    SCORE_THRESHOLD = float(os.environ.get("SCORE_THRESHOLD", "0.5"))
+
+    def score_episode(episode: dict) -> float:
+        summary = (
+            f"Episode with {episode['ticks']} ticks, avg latency {episode['avg_latency_ms']:.0f}ms, "
+            f"all within budget: {episode['all_within_budget']}, has failure: {episode['has_failure']}. "
+            f"Scene: {episode['scene']}"
+        )
+        try:
+            resp = requests.post(
+                f"{VLLM_URL}/v1/chat/completions",
+                json={
+                    "model": "nvidia/Cosmos3-Edge",
+                    "messages": [
+                        {"role": "system", "content": "You are a training data quality scorer. Rate the episode 0.0-1.0 for training value. Respond with ONLY a number."},
+                        {"role": "user", "content": summary},
+                    ],
+                    "max_tokens": 10,
+                    "temperature": 0.1,
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            text = resp.json()["choices"][0]["message"]["content"].strip()
+            for token in text.split():
+                try:
+                    return max(0.0, min(1.0, float(token)))
+                except ValueError:
+                    continue
+            return 0.5
+        except Exception as e:
+            print(f"[curator] Scoring failed: {e}", flush=True)
+            return 0.5
+
+    if __name__ == "__main__":
+        print(f"[curator] Starting — threshold {SCORE_THRESHOLD}, watching {RAW_DIR}", flush=True)
+        CURATED_DIR.mkdir(parents=True, exist_ok=True)
+        REJECTED_DIR.mkdir(parents=True, exist_ok=True)
+
+        while True:
+            for path in sorted(RAW_DIR.glob("*.json")):
+                try:
+                    episode = json.loads(path.read_text())
+                    score = score_episode(episode)
+                    episode["curation_score"] = round(score, 3)
+                    episode["curation_verdict"] = "pass" if score >= SCORE_THRESHOLD else "reject"
+
+                    if score >= SCORE_THRESHOLD:
+                        dest = CURATED_DIR / path.name
+                        dest.write_text(json.dumps(episode, indent=2))
+                        print(f"[curator] PASS {episode['episode_id']} score={score:.2f}", flush=True)
+                    else:
+                        dest = REJECTED_DIR / path.name
+                        dest.write_text(json.dumps(episode, indent=2))
+                        print(f"[curator] REJECT {episode['episode_id']} score={score:.2f}", flush=True)
+
+                    path.unlink()
+                except Exception as e:
+                    print(f"[curator] Error processing {path.name}: {e}", flush=True)
+
+            time.sleep(3)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: curator
+  namespace: flywheel
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: curator
+  template:
+    metadata:
+      labels:
+        app: curator
+    spec:
+      containers:
+        - name: curator
+          image: docker.io/library/python:3.12-slim
+          command: ["sh", "-c", "pip install -q requests && python /app/curator.py"]
+          env:
+            - name: VLLM_URL
+              value: "http://cosmos3-edge.vllm.svc:8000"
+            - name: SCORE_THRESHOLD
+              value: "0.5"
+          volumeMounts:
+            - name: code
+              mountPath: /app
+              readOnly: true
+            - name: episodes
+              mountPath: /data/episodes
+      volumes:
+        - name: code
+          configMap:
+            name: curator-code
+        - name: episodes
+          hostPath:
+            path: /var/lib/episodes

@@ -1,0 +1,141 @@
+# This project was developed with assistance from AI tools.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: robot-sim-code
+  namespace: flywheel
+data:
+  robot_sim.py: |
+    """Simulated robot control loop — replays scenes at 5 Hz, calls Cosmos3-Edge Reasoner."""
+    import json, os, time, uuid, random, requests, pathlib
+
+    VLLM_URL = os.environ.get("VLLM_URL", "http://cosmos3-edge.vllm.svc:8000")
+    TICK_HZ = float(os.environ.get("TICK_HZ", "5"))
+    EPISODE_DIR = pathlib.Path(os.environ.get("EPISODE_DIR", "/data/episodes/raw"))
+    TICKS_PER_EPISODE = int(os.environ.get("TICKS_PER_EPISODE", "10"))
+    FAILURE_RATE = float(os.environ.get("FAILURE_RATE", "0.3"))
+
+    SCENES = [
+        "A mobile robot approaches a warehouse shelf with packages to pick.",
+        "A robotic arm is positioned above a conveyor belt with mixed objects.",
+        "A humanoid robot stands in front of a closed door in a hallway.",
+        "A delivery robot navigates a sidewalk approaching a crosswalk.",
+        "A robotic gripper hovers over a bin of unsorted components.",
+    ]
+
+    def call_reasoner(scene: str) -> dict:
+        try:
+            resp = requests.post(
+                f"{VLLM_URL}/v1/chat/completions",
+                json={
+                    "model": "nvidia/Cosmos3-Edge",
+                    "messages": [
+                        {"role": "system", "content": "You are a robot action planner. Given a scene, output a short action plan as JSON with keys: action, confidence, reasoning."},
+                        {"role": "user", "content": f"Scene: {scene}"},
+                    ],
+                    "max_tokens": 150,
+                    "temperature": 0.7,
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"]
+            return {"raw_response": content, "latency_ms": resp.elapsed.total_seconds() * 1000}
+        except Exception as e:
+            return {"raw_response": "", "error": str(e), "latency_ms": 0}
+
+    def run_episode() -> dict:
+        episode_id = str(uuid.uuid4())[:12]
+        scene = random.choice(SCENES)
+        inject_failure = random.random() < FAILURE_RATE
+        ticks = []
+
+        for tick in range(TICKS_PER_EPISODE):
+            t0 = time.monotonic()
+            result = call_reasoner(scene)
+            elapsed = time.monotonic() - t0
+            budget = 1.0 / TICK_HZ
+
+            ticks.append({
+                "tick": tick,
+                "scene": scene,
+                "action_result": result,
+                "elapsed_s": round(elapsed, 4),
+                "within_budget": elapsed <= budget,
+                "injected_failure": inject_failure and tick == TICKS_PER_EPISODE - 1,
+            })
+
+            sleep_remaining = max(0, budget - elapsed)
+            time.sleep(sleep_remaining)
+
+        episode = {
+            "episode_id": episode_id,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "scene": scene,
+            "ticks": len(ticks),
+            "avg_latency_ms": round(sum(t["action_result"].get("latency_ms", 0) for t in ticks) / len(ticks), 1),
+            "all_within_budget": all(t["within_budget"] for t in ticks),
+            "has_failure": any(t["injected_failure"] for t in ticks),
+            "model_version": "cosmos3-edge-v1",
+            "tick_data": ticks,
+        }
+
+        EPISODE_DIR.mkdir(parents=True, exist_ok=True)
+        path = EPISODE_DIR / f"{episode_id}.json"
+        path.write_text(json.dumps(episode, indent=2))
+        print(f"[robot-sim] Episode {episode_id}: {len(ticks)} ticks, avg {episode['avg_latency_ms']:.0f}ms, failure={episode['has_failure']}", flush=True)
+        return episode
+
+    if __name__ == "__main__":
+        print(f"[robot-sim] Starting — {TICK_HZ} Hz, {TICKS_PER_EPISODE} ticks/episode, {FAILURE_RATE:.0%} failure rate", flush=True)
+        cooldown = float(os.environ.get("EPISODE_COOLDOWN_S", "5"))
+        while True:
+            try:
+                run_episode()
+            except Exception as e:
+                print(f"[robot-sim] Episode failed: {e}", flush=True)
+            time.sleep(cooldown)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: robot-sim
+  namespace: flywheel
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: robot-sim
+  template:
+    metadata:
+      labels:
+        app: robot-sim
+    spec:
+      containers:
+        - name: robot-sim
+          image: docker.io/library/python:3.12-slim
+          command: ["sh", "-c", "pip install -q requests && python /app/robot_sim.py"]
+          env:
+            - name: VLLM_URL
+              value: "http://cosmos3-edge.vllm.svc:8000"
+            - name: TICK_HZ
+              value: "1"
+            - name: TICKS_PER_EPISODE
+              value: "5"
+            - name: FAILURE_RATE
+              value: "0.3"
+            - name: EPISODE_COOLDOWN_S
+              value: "10"
+          volumeMounts:
+            - name: code
+              mountPath: /app
+              readOnly: true
+            - name: episodes
+              mountPath: /data/episodes
+      volumes:
+        - name: code
+          configMap:
+            name: robot-sim-code
+        - name: episodes
+          hostPath:
+            path: /var/lib/episodes

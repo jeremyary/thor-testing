@@ -1,0 +1,137 @@
+# This project was developed with assistance from AI tools.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sync-agent-code
+  namespace: flywheel
+data:
+  sync_agent.py: |
+    """Sync agent — uploads curated episodes to hub MinIO and publishes manifests to Kafka."""
+    import json, os, time, pathlib, ssl
+
+    CURATED_DIR = pathlib.Path(os.environ.get("CURATED_DIR", "/data/episodes/curated"))
+    SENT_DIR = pathlib.Path(os.environ.get("SENT_DIR", "/data/episodes/sent"))
+    S3_ENDPOINT = os.environ.get("S3_ENDPOINT")
+    S3_BUCKET = os.environ.get("S3_BUCKET", "episodes-curated")
+    S3_ACCESS_KEY = os.environ.get("S3_ACCESS_KEY")
+    S3_SECRET_KEY = os.environ.get("S3_SECRET_KEY")
+    KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP")
+    KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "episode-manifests")
+
+    def get_s3_client():
+        import boto3
+        return boto3.client(
+            "s3",
+            endpoint_url=S3_ENDPOINT,
+            aws_access_key_id=S3_ACCESS_KEY,
+            aws_secret_access_key=S3_SECRET_KEY,
+        )
+
+    def ensure_bucket(s3):
+        try:
+            s3.head_bucket(Bucket=S3_BUCKET)
+        except Exception:
+            s3.create_bucket(Bucket=S3_BUCKET)
+            print(f"[sync-agent] Created bucket {S3_BUCKET}", flush=True)
+
+    def get_kafka_producer():
+        from kafka import KafkaProducer
+        return KafkaProducer(
+            bootstrap_servers=KAFKA_BOOTSTRAP,
+            security_protocol="SSL",
+            ssl_check_hostname=False,
+            ssl_context=ssl._create_unverified_context(),
+            value_serializer=lambda v: json.dumps(v).encode(),
+        )
+
+    def upload_and_publish(s3, producer, path: pathlib.Path):
+        episode = json.loads(path.read_text())
+        episode_id = episode["episode_id"]
+        s3_key = f"{episode['model_version']}/{episode_id}.json"
+
+        s3.put_object(Bucket=S3_BUCKET, Key=s3_key, Body=path.read_bytes(), ContentType="application/json")
+
+        manifest = {
+            "episode_id": episode_id,
+            "s3_uri": f"s3://{S3_BUCKET}/{s3_key}",
+            "curation_score": episode.get("curation_score", 0),
+            "scene": episode.get("scene", ""),
+            "model_version": episode.get("model_version", ""),
+            "ticks": episode.get("ticks", 0),
+            "avg_latency_ms": episode.get("avg_latency_ms", 0),
+            "timestamp": episode.get("timestamp", ""),
+        }
+        producer.send(KAFKA_TOPIC, value=manifest)
+        producer.flush()
+
+        SENT_DIR.mkdir(parents=True, exist_ok=True)
+        path.rename(SENT_DIR / path.name)
+        print(f"[sync-agent] Uploaded {episode_id} -> {s3_key}, manifest -> {KAFKA_TOPIC}", flush=True)
+
+    if __name__ == "__main__":
+        print(f"[sync-agent] Starting — S3={S3_ENDPOINT}, Kafka={KAFKA_BOOTSTRAP}", flush=True)
+        CURATED_DIR.mkdir(parents=True, exist_ok=True)
+
+        s3 = get_s3_client()
+        ensure_bucket(s3)
+        producer = get_kafka_producer()
+
+        while True:
+            for path in sorted(CURATED_DIR.glob("*.json")):
+                try:
+                    upload_and_publish(s3, producer, path)
+                except Exception as e:
+                    print(f"[sync-agent] Error syncing {path.name}: {e}", flush=True)
+            time.sleep(5)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sync-agent
+  namespace: flywheel
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sync-agent
+  template:
+    metadata:
+      labels:
+        app: sync-agent
+    spec:
+      containers:
+        - name: sync-agent
+          image: docker.io/library/python:3.12-slim
+          command: ["sh", "-c", "pip install -q boto3 kafka-python-ng && python /app/sync_agent.py"]
+          env:
+            - name: S3_ENDPOINT
+              value: "https://minio-api-robotics-data.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com"
+            - name: S3_BUCKET
+              value: "episodes-curated"
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: hub-credentials
+                  key: s3-access-key
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: hub-credentials
+                  key: s3-secret-key
+            - name: KAFKA_BOOTSTRAP
+              value: "fleet-kafka-bootstrap-fleet-ops.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com:443"
+            - name: KAFKA_TOPIC
+              value: "episode-manifests"
+          volumeMounts:
+            - name: code
+              mountPath: /app
+              readOnly: true
+            - name: episodes
+              mountPath: /data/episodes
+      volumes:
+        - name: code
+          configMap:
+            name: sync-agent-code
+        - name: episodes
+          hostPath:
+            path: /var/lib/episodes
