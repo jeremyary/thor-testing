@@ -4,8 +4,8 @@
 # Adds MicroShift, flightctl-agent, greenboot, and workload plumbing
 # to the sidecar team's CentOS Stream 10 Thor image.
 #
-# Build: podman build --platform linux/arm64 -t quay.io/jary/thor-edge:latest .
-# Deploy: bootc switch --transport registry quay.io/jary/thor-edge:latest
+# Build: oc start-build thor-edge-image -n thor-builds
+# Deploy: RHEM fleet spec declares the image; flightctl-agent applies it via bootc
 
 ARG BASE_IMAGE=registry.gitlab.com/redhat/rhel/sst/orin-sidecar/nvidia-jetson-sidecar/rhel-stream10:a66617e5-thor
 
@@ -86,8 +86,6 @@ RUN chmod +x /etc/greenboot/check/required.d/40_microshift_running.sh \
 # --- Sigstore trust anchor ---
 COPY config/policy.json /etc/containers/policy.json
 COPY config/cosign-signing.pub /etc/pki/containers/cosign-signing.pub
-RUN mkdir -p /etc/containers/registries.d && \
-    printf 'docker:\n  quay.io/jary:\n    use-sigstore-attachments: true\n' > /etc/containers/registries.d/quay-jary.yaml
 
 # --- MicroShift configuration ---
 RUN mkdir -p /etc/microshift

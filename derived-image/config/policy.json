@@ -6,7 +6,7 @@
     ],
     "transports": {
         "docker": {
-            "quay.io/jary": [
+            "default-route-openshift-image-registry.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com": [
                 {
                     "type": "sigstoreSigned",
                     "keyPath": "/etc/pki/containers/cosign-signing.pub",
