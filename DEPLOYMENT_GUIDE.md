@@ -53,14 +53,39 @@ nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
 
 The image is arm64 and must be built natively or cross-built with qemu. An OpenShift BuildConfig handles this (see Section 8).
 
-### 1.4 Deploying to Thor
+### 1.4 Embedded Workload Images (Air-Gapped Operation)
+
+Workload container images are embedded in the bootc image during build, following Red Hat's documented pattern for disconnected MicroShift. No device-side registry needed.
+
+**`config/embedded-images.txt`** lists images to embed:
+```
+docker.io/vllm/vllm-omni:cosmos3
+docker.io/library/python:3.12-slim
+docker.io/library/registry:2
+```
+
+The Containerfile uses `skopeo copy` to pull them into `/usr/lib/containers/storage/` as `dir:` blobs at build time. A systemd `ExecStartPre` drop-in on `microshift.service` loads them into CRI-O's `containers-storage:` at every boot.
+
+### 1.5 OpenTelemetry Collector (RPM)
+
+The `opentelemetry-collector` RPM from CentOS Stream 10 AppStream is baked into the image. Runs as a systemd service with host-level access to journald, hostmetrics, and GPU telemetry. Config at `/etc/opentelemetry-collector/config.yaml` includes:
+
+- Prometheus receiver: scrapes vLLM `/metrics`
+- Journald receiver: MicroShift, CRI-O, flightctl-agent, GPU reset logs
+- Host metrics: CPU, memory, disk, load, network
+- OTLP receiver: for application traces
+- File-storage persistent queue at `/var/lib/otel-queue` for disconnect tolerance
+- OTLP/HTTP exporter to hub gateway with `max_elapsed_time: 0` (retry forever)
+
+### 1.6 Deploying to Thor
 
 ```bash
-bootc switch --transport registry quay.io/jary/thor-edge:latest
+# From the internal registry (hub-side build)
+bootc switch --transport registry default-route-openshift-image-registry.apps.<cluster>/thor-builds/thor-edge:latest
 reboot
 ```
 
-### 1.5 Known Workarounds
+### 1.7 Known Workarounds
 
 - **CUDA pre-initialization**: `torch.zeros(1, device="cuda")` must be called before importing vLLM. Without this, vLLM's config creation breaks CUDA.
 - **vLLM v1 multiprocessing**: `VLLM_ENABLE_V1_MULTIPROCESSING=0` — the EngineCore subprocess can't see the GPU through CDI/CRI-O.
@@ -552,7 +577,120 @@ Negative test (unsigned tag should be refused):
 podman pull quay.io/jary/thor-edge:unsigned  # should fail with policy violation
 ```
 
-## 10. Decision Log
+## 10. Telemetry (Phase 6)
+
+### 10.1 Hub Operators
+
+Install from OperatorHub:
+- **Cluster Observability Operator (COO)** — stable channel, Red Hat Operators
+- **Tempo Operator** — bundled with COO install plan
+
+The Red Hat build of OpenTelemetry CRDs are included with COO.
+
+### 10.2 TempoStack
+
+Deploy in the `observability` namespace, backed by MinIO:
+
+```yaml
+apiVersion: tempo.grafana.com/v1alpha1
+kind: TempoStack
+metadata:
+  name: edge-traces
+  namespace: observability
+spec:
+  storage:
+    secret:
+      name: tempo-minio
+      type: s3
+  template:
+    queryFrontend:
+      jaegerQuery:
+        enabled: true
+        ingress:
+          type: route
+  storageSize: 10Gi
+  retention:
+    global:
+      traces: 168h
+```
+
+MinIO secret references the existing MinIO in `robotics-data` namespace. Create a `tempo-traces` bucket.
+
+### 10.3 Hub OTel Gateway
+
+An `OpenTelemetryCollector` CR in deployment mode with an external route:
+
+```yaml
+apiVersion: opentelemetry.io/v1beta1
+kind: OpenTelemetryCollector
+metadata:
+  name: edge-gateway
+  namespace: observability
+spec:
+  mode: deployment
+  ingress:
+    type: route
+    route:
+      termination: edge
+  config:
+    receivers:
+      otlp:
+        protocols:
+          http:
+            endpoint: 0.0.0.0:4318
+    processors:
+      batch: {}
+      memory_limiter:
+        limit_mib: 512
+    exporters:
+      otlp/tempo:
+        endpoint: tempo-edge-traces-distributor.observability.svc:4317
+        tls:
+          insecure: true
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [otlp/tempo]
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [debug]
+```
+
+Exposes routes:
+- `otlp-http-edge-gateway-route-observability.apps.<cluster>` — OTLP/HTTP for edge collector
+- `otlp-grpc-edge-gateway-route-observability.apps.<cluster>` — OTLP/gRPC
+
+### 10.4 Device OTel Collector
+
+Installed as an RPM in the bootc image (see Section 1.5). Config at `/etc/opentelemetry-collector/config.yaml`. Key features:
+
+- **Connected mode**: telemetry flows to hub in real-time via OTLP/HTTP route
+- **Disconnected mode**: `file_storage` extension spools to `/var/lib/otel-queue` on NVMe, `max_elapsed_time: 0` retries indefinitely, drains automatically when connectivity returns
+- **Resource attributes**: `device.id`, `device.type`, `model.version` stamped on all signals for Grafana filtering
+
+### 10.5 Disconnect Tolerance Test
+
+```bash
+# On Thor: pull the uplink
+ip link set enP2p1s0 down
+
+# Run the flywheel — telemetry spools locally
+oc scale deployment robot-sim curator -n flywheel --replicas=1
+
+# After some episodes, restore connectivity
+ip link set enP2p1s0 up
+
+# Watch the backfill in the hub's Tempo UI / Grafana
+```
+
+### 10.6 Visualization
+
+COO provides OpenShift console UI plugins for distributed tracing and log correlation. The Tempo query frontend route provides a Jaeger-compatible UI for trace exploration. For custom dashboards, the community Grafana operator is available on OperatorHub (not RH-supported).
+
+## 11. Decision Log
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
@@ -566,3 +704,6 @@ podman pull quay.io/jary/thor-edge:unsigned  # should fail with policy violation
 | Flywheel default | replicas: 0 | GPU coil whine during continuous inference; scale up manually for testing/demo |
 | Image signing | Static cosign keypair + RHTAS Rekor | Full keyless needs OIDC client registration; static keys prove the same trust mechanics with Rekor transparency |
 | Trust enforcement | sigstoreSigned in policy.json | CRI-O and bootc both respect containers-policy.json; unsigned images from quay.io/jary refused |
+| Air-gapped images | Embedded in bootc via skopeo + systemd loader | Red Hat's documented MicroShift disconnected pattern; no device-side registry needed |
+| OTel collector | RPM systemd service (not container) | Upstream contrib container fails on arm64; RPM gives host-level access to journald/GPU telemetry |
+| Build output | Internal OpenShift registry | Hub-side source of truth; devices receive images embedded in bootc, not pulled from external registry |
