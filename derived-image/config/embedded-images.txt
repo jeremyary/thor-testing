@@ -1,0 +1,5 @@
+# Workload images to embed in the bootc image for air-gapped operation.
+# One image reference per line. Comments and blank lines are ignored.
+docker.io/vllm/vllm-omni:cosmos3
+docker.io/library/python:3.12-slim
+docker.io/library/registry:2

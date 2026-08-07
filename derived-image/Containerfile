@@ -90,3 +90,24 @@ COPY config/microshift-config.yaml /etc/microshift/config.yaml
 # --- Day-0 manifest directory ---
 RUN mkdir -p /etc/microshift/manifests
 COPY manifests/ /etc/microshift/manifests/
+
+# --- Embed workload container images for air-gapped operation ---
+ENV IMAGE_STORAGE_DIR=/usr/lib/containers/storage
+ENV IMAGE_LIST_FILE=${IMAGE_STORAGE_DIR}/image-list.txt
+COPY config/embedded-images.txt /tmp/embedded-images.txt
+RUN mkdir -p "${IMAGE_STORAGE_DIR}" && \
+    while IFS= read -r img || [ -n "$img" ]; do \
+        [ -z "$img" ] && continue; \
+        [ "${img#\#}" != "$img" ] && continue; \
+        sha="$(echo "${img}" | sha256sum | awk '{print $1}')" ; \
+        skopeo copy --all --preserve-digests \
+            "docker://${img}" "dir:${IMAGE_STORAGE_DIR}/${sha}" && \
+        echo "${img},${sha}" >> "${IMAGE_LIST_FILE}" ; \
+    done < /tmp/embedded-images.txt && \
+    rm -f /tmp/embedded-images.txt
+
+# --- Boot-time image loader (dir: -> containers-storage:) ---
+COPY config/microshift-copy-images.sh /usr/bin/microshift-copy-images
+RUN chmod 755 /usr/bin/microshift-copy-images && \
+    mkdir -p /usr/lib/systemd/system/microshift.service.d
+COPY config/microshift-copy-images.conf /usr/lib/systemd/system/microshift.service.d/microshift-copy-images.conf
