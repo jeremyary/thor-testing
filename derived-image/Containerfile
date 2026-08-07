@@ -16,14 +16,7 @@ FROM ${BASE_IMAGE}
 RUN rpm -ivh https://mirror.stream.centos.org/10-stream/BaseOS/aarch64/os/Packages/unbound-libs-1.25.1-1.el10.aarch64.rpm
 
 # --- MicroShift repo (el9 mirror with full repodata) ---
-RUN cat > /etc/yum.repos.d/microshift-4.22.repo << 'REPO'
-[microshift-4.22]
-name=MicroShift 4.22
-baseurl=https://mirror.openshift.com/pub/openshift-v4/aarch64/microshift/ocp/latest-4.22/el9/os
-enabled=1
-gpgcheck=0
-sslverify=1
-REPO
+RUN printf '[microshift-4.22]\nname=MicroShift 4.22\nbaseurl=https://mirror.openshift.com/pub/openshift-v4/aarch64/microshift/ocp/latest-4.22/el9/os\nenabled=1\ngpgcheck=0\nsslverify=1\n' > /etc/yum.repos.d/microshift-4.22.repo
 
 # --- flightctl repo ---
 RUN curl -fsSL -o /etc/yum.repos.d/flightctl.repo \
