@@ -5,6 +5,17 @@
         }
     ],
     "transports": {
+        "docker": {
+            "quay.io/jary": [
+                {
+                    "type": "sigstoreSigned",
+                    "keyPath": "/etc/pki/containers/cosign-signing.pub",
+                    "signedIdentity": {
+                        "type": "matchRepository"
+                    }
+                }
+            ]
+        },
         "docker-daemon": {
             "": [
                 {

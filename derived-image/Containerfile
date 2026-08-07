@@ -77,8 +77,11 @@ COPY greenboot/40_vllm_gpu.sh /etc/greenboot/check/required.d/40_vllm_gpu.sh
 RUN chmod +x /etc/greenboot/check/required.d/40_microshift_running.sh \
              /etc/greenboot/check/required.d/40_vllm_gpu.sh
 
-# --- Sigstore policy placeholder (permissive — tightened in Phase 5) ---
+# --- Sigstore trust anchor ---
 COPY config/policy.json /etc/containers/policy.json
+COPY config/cosign-signing.pub /etc/pki/containers/cosign-signing.pub
+RUN mkdir -p /etc/containers/registries.d && \
+    printf 'docker:\n  quay.io/jary:\n    use-sigstore-attachments: true\n' > /etc/containers/registries.d/quay-jary.yaml
 
 # --- MicroShift configuration ---
 RUN mkdir -p /etc/microshift
