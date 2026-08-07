@@ -17,7 +17,7 @@ data:
     hub.security.protocol=SSL
     hub.ssl.endpoint.identification.algorithm=
     hub.ssl.truststore.type=PEM
-    hub.ssl.truststore.certificates=/certs/ca.crt
+    hub.ssl.truststore.location=/certs/ca.crt
 
     # Replication: edge -> hub only
     edge->hub.enabled=true
