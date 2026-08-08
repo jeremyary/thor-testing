@@ -428,48 +428,55 @@ oc create sa qemu-binfmt -n openshift-operators
 oc adm policy add-scc-to-user privileged -z qemu-binfmt -n openshift-operators
 ```
 
-### 8.2 OpenShift BuildConfig
+### 8.2 Tekton Pipeline (Build + Sign)
 
-```yaml
-apiVersion: build.openshift.io/v1
-kind: BuildConfig
-metadata:
-  name: thor-edge-image
-  namespace: thor-builds
-spec:
-  source:
-    type: Git
-    git:
-      uri: https://github.com/jeremyary/thor-testing.git
-      ref: main
-    contextDir: derived-image
-  strategy:
-    type: Docker
-    dockerStrategy:
-      dockerfilePath: Containerfile
-      buildArgs:
-        - name: BASE_IMAGE
-          value: registry.gitlab.com/redhat/rhel/sst/orin-sidecar/nvidia-jetson-sidecar/rhel-stream10:a66617e5-thor
-      pullSecret:
-        name: gitlab-pull-secret
-  output:
-    to:
-      kind: DockerImage
-      name: default-route-openshift-image-registry.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com/thor-builds/thor-edge:latest
-    pushSecret:
-      name: quay-push-secret
-```
+The image build uses an OpenShift Pipelines (Tekton) pipeline that clones the repo, cross-builds the arm64 bootc image with buildah, pushes to the internal registry, and signs with cosign + RHTAS Rekor in a single pipeline run. Manifests live in `tekton/`.
 
-Registry secrets in `thor-builds` namespace:
+**Prerequisites:**
+- OpenShift Pipelines operator installed
+- RHTAS deployed (Section 9) with cosign keypair generated
+- qemu-user-static DaemonSet running (Section 8.1)
+
+**Secrets in `thor-builds` namespace:**
 ```bash
-oc create secret docker-registry quay-push-secret \
-  --docker-server=quay.io --docker-username=$QUAY_ROBOT_USER --docker-password=$QUAY_ROBOT_TOKEN
+# GitLab pull secret for the base image
 oc create secret docker-registry gitlab-pull-secret \
-  --docker-server=registry.gitlab.com --docker-username=$GITLAB_RO_USER --docker-password=$GITLAB_RO_TOKEN
-oc secrets link builder quay-push-secret gitlab-pull-secret
+  --docker-server=registry.gitlab.com \
+  --docker-username=$GITLAB_RO_USER \
+  --docker-password=$GITLAB_RO_TOKEN \
+  -n thor-builds
+
+# Cosign signing key (from the keypair generated in Section 9.3)
+oc create secret generic cosign-signing-key \
+  --from-file=cosign.key=thor-signing.key \
+  --from-file=cosign.pub=thor-signing.pub \
+  --from-literal=cosign.password="" \
+  -n thor-builds
+
+# Link the pull secret to the pipeline SA
+oc secrets link pipeline gitlab-pull-secret --for=pull,mount -n thor-builds
 ```
 
-Trigger a build: `oc start-build thor-edge-image -n thor-builds`
+**Apply the pipeline manifests:**
+```bash
+oc apply -f tekton/01-cosign-sign-task.yaml
+oc apply -f tekton/02-pipeline.yaml
+```
+
+**Trigger a build:**
+```bash
+oc create -f tekton/03-pipelinerun.yaml
+```
+
+The pipeline runs three tasks sequentially:
+1. **git-clone** — clones the repo (ClusterTask)
+2. **build-and-push** — cross-builds the arm64 image via buildah + qemu, pushes to internal registry (ClusterTask)
+3. **sign-image** — signs the pushed image by digest with cosign, uploads signature to RHTAS Rekor
+
+The PipelineRun timeout is set to 3 hours to accommodate the qemu cross-build. Monitor with:
+```bash
+tkn pipelinerun logs -f -n thor-builds
+```
 
 ## 9. Trust Plane — RHTAS (Phase 5)
 
@@ -527,8 +534,9 @@ cosign generate-key-pair --output-key-prefix=thor-signing
 cosign initialize --mirror=$TUF_URL --root=$TUF_URL/root.json
 ```
 
-Sign an image (with Rekor transparency logging):
+Signing is automated as part of the Tekton build pipeline (Section 8.2). The pipeline's `sign-image` task uses the `cosign-signing-key` Secret and logs to Rekor.
 
+To sign manually (e.g., for testing):
 ```bash
 COSIGN_PASSWORD="" cosign sign --key=thor-signing.key \
   --rekor-url=$REKOR_URL \

@@ -1,0 +1,57 @@
+# This project was developed with assistance from AI tools.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: cosign-sign
+  namespace: thor-builds
+spec:
+  description: Sign an OCI image with a cosign keypair and log to RHTAS Rekor.
+  params:
+    - name: IMAGE
+      type: string
+      description: Full image reference to sign (registry/repo@sha256:digest)
+    - name: REKOR_URL
+      type: string
+      description: RHTAS Rekor transparency log URL
+    - name: REGISTRY_LOGIN
+      type: string
+      description: Registry hostname to authenticate against (uses SA token)
+      default: ""
+    - name: COSIGN_VERSION
+      type: string
+      default: v2.4.1
+  workspaces:
+    - name: cosign-key
+      description: Secret workspace containing cosign.key
+  steps:
+    - name: sign
+      image: registry.access.redhat.com/ubi9/ubi:latest
+      env:
+        - name: COSIGN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: cosign-signing-key
+              key: cosign.password
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        curl -fsSL -o /usr/local/bin/cosign \
+          "https://github.com/sigstore/cosign/releases/download/$(params.COSIGN_VERSION)/cosign-linux-amd64"
+        chmod +x /usr/local/bin/cosign
+
+        REGISTRY_LOGIN="$(params.REGISTRY_LOGIN)"
+        if [ -n "$REGISTRY_LOGIN" ]; then
+          SA_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+          cosign login "$REGISTRY_LOGIN" -u ignored -p "$SA_TOKEN"
+        fi
+
+        echo "Signing image: $(params.IMAGE)"
+        cosign sign \
+          --key="$(workspaces.cosign-key.path)/cosign.key" \
+          --rekor-url="$(params.REKOR_URL)" \
+          --tlog-upload=true \
+          -y \
+          "$(params.IMAGE)"
+
+        echo "Image signed and logged to Rekor."

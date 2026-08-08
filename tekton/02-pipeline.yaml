@@ -1,0 +1,103 @@
+# This project was developed with assistance from AI tools.
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: thor-edge-build
+  namespace: thor-builds
+spec:
+  description: Build, push, and sign the Thor edge bootc image.
+  params:
+    - name: git-url
+      type: string
+      default: https://github.com/jeremyary/thor-testing.git
+    - name: git-revision
+      type: string
+      default: main
+    - name: image-tag
+      type: string
+      default: latest
+    - name: base-image
+      type: string
+      default: registry.gitlab.com/redhat/rhel/sst/orin-sidecar/nvidia-jetson-sidecar/rhel-stream10:a66617e5-thor
+    - name: registry-route
+      type: string
+      default: default-route-openshift-image-registry.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com
+      description: External registry route (used for signing and device pull)
+    - name: rekor-url
+      type: string
+      default: https://rekor-server-trusted-artifact-signer.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com
+      description: RHTAS Rekor transparency log URL
+  workspaces:
+    - name: shared-workspace
+    - name: cosign-key
+    - name: docker-credentials
+      optional: true
+  tasks:
+    - name: git-clone
+      taskRef:
+        resolver: cluster
+        params:
+          - name: kind
+            value: task
+          - name: name
+            value: git-clone
+          - name: namespace
+            value: openshift-pipelines
+      workspaces:
+        - name: output
+          workspace: shared-workspace
+      params:
+        - name: URL
+          value: $(params.git-url)
+        - name: REVISION
+          value: $(params.git-revision)
+        - name: DEPTH
+          value: "0"
+
+    - name: build-and-push
+      taskRef:
+        resolver: cluster
+        params:
+          - name: kind
+            value: task
+          - name: name
+            value: buildah
+          - name: namespace
+            value: openshift-pipelines
+      runAfter:
+        - git-clone
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+        - name: dockerconfig
+          workspace: docker-credentials
+      params:
+        - name: IMAGE
+          value: image-registry.openshift-image-registry.svc:5000/thor-builds/thor-edge:$(params.image-tag)
+        - name: DOCKERFILE
+          value: derived-image/Containerfile
+        - name: CONTEXT
+          value: derived-image
+        - name: BUILD_EXTRA_ARGS
+          value: "--platform linux/arm64"
+        - name: BUILD_ARGS
+          value:
+            - "BASE_IMAGE=$(params.base-image)"
+        - name: TLS_VERIFY
+          value: "false"
+
+    - name: sign-image
+      taskRef:
+        name: cosign-sign
+      runAfter:
+        - build-and-push
+      workspaces:
+        - name: cosign-key
+          workspace: cosign-key
+      params:
+        - name: IMAGE
+          value: $(params.registry-route)/thor-builds/thor-edge@$(tasks.build-and-push.results.IMAGE_DIGEST)
+        - name: REKOR_URL
+          value: $(params.rekor-url)
+        - name: REGISTRY_LOGIN
+          value: $(params.registry-route)

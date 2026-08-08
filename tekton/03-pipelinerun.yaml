@@ -1,0 +1,27 @@
+# This project was developed with assistance from AI tools.
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: thor-edge-build-
+  namespace: thor-builds
+spec:
+  pipelineRef:
+    name: thor-edge-build
+  timeouts:
+    pipeline: 3h0m0s
+    tasks: 2h30m0s
+  workspaces:
+    - name: shared-workspace
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi
+    - name: cosign-key
+      secret:
+        secretName: cosign-signing-key
+    - name: docker-credentials
+      secret:
+        secretName: gitlab-pull-secret
