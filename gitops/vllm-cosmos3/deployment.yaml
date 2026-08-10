@@ -27,7 +27,7 @@ spec:
         - name: fetch-model
           image: default-route-openshift-image-registry.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com/thor-builds/cosmos3-edge-modelcar:v1
           imagePullPolicy: IfNotPresent
-          command: ["cp", "-a", "/models/huggingface", "/hf-cache/"]
+          command: ["bash", "-c", "cp -a /models/huggingface/. /hf-cache/"]
           volumeMounts:
             - name: hf-cache
               mountPath: /hf-cache
