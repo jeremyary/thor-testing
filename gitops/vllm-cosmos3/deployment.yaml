@@ -49,8 +49,21 @@ spec:
               value: "0"
             - name: HF_HUB_DISABLE_XET
               value: "1"
-            - name: HF_HUB_OFFLINE
-              value: "1"
+            # NOT HF_HUB_OFFLINE=1: vllm-omni's Cosmos3 DiffusionWorker
+            # subprocess re-resolves the tokenizer/VAE subfolders via
+            # `os.path.exists(model_path)` on the *unresolved* repo id
+            # rather than the snapshot_download()-resolved absolute path,
+            # so it falls through to local_files_only=False for that one
+            # internal call (see DECISIONS.md D014). Standard HF cache-first
+            # resolution still finds everything in the modelcar-sourced
+            # cache without hitting the network in practice; HF_TOKEN stays
+            # as a narrow fallback for that one framework quirk, not as the
+            # primary weight delivery path.
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-credentials
+                  key: token
           resources:
             limits:
               nvidia.com/gpu: "1"
