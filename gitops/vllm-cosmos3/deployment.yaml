@@ -18,6 +18,22 @@ spec:
       labels:
         app: cosmos3-edge
     spec:
+      # Thor's CRI-O has no credentials configured for the hub's internal
+      # registry at the node level (/etc/crio/openshift-pull-secret only
+      # covers registry.redhat.io/quay.io/etc) -- that gap was previously
+      # invisible because every image pulled here (vllm-omni, python,
+      # nvidia-device-plugin) is public, or (for the modelcar's original
+      # manually-built :v1 tag) happened to already be resident in local
+      # podman/CRI-O shared storage from being built directly on Thor.
+      # Once the modelcar started coming from the hub-side Tekton pipeline
+      # (D017), CRI-O had to do a genuine authenticated pull and failed with
+      # "authentication required". thor-registry-pull is a manually-created
+      # (not GitOps-managed, matches hf-credentials/cosign-signing-key
+      # convention) docker-registry Secret backed by a 1-year token for a
+      # dedicated thor-edge-puller SA in thor-builds with system:image-puller
+      # scoped to that namespace.
+      imagePullSecrets:
+        - name: thor-registry-pull
       # D014: model weights ship as a signed OCI artifact (modelcar), not an
       # ungoverned HuggingFace runtime download. The modelcar image is a data
       # carrier only (see modelcar/Containerfile) -- this initContainer copies
