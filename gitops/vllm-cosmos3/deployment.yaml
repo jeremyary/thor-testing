@@ -25,7 +25,10 @@ spec:
       # starts, then HF_HUB_OFFLINE=1 guarantees no network fallback.
       initContainers:
         - name: fetch-model
-          image: default-route-openshift-image-registry.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com/thor-builds/cosmos3-edge-modelcar:v1
+          # Built by tekton/05-modelcar-pipeline.yaml (crane append, not
+          # buildah -- see DECISIONS.md D014), pinned by digest to match this
+          # repo's convention of signing/referencing images by digest.
+          image: default-route-openshift-image-registry.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com/thor-builds/cosmos3-edge-modelcar@sha256:5c990c93553514cea831fff2c040a879820a55012631648cd2fcdb05943a99ea
           imagePullPolicy: IfNotPresent
           command: ["bash", "-c", "cp -a /models/huggingface/. /hf-cache/"]
           volumeMounts:

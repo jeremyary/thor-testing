@@ -1,0 +1,127 @@
+# This project was developed with assistance from AI tools.
+#
+# Build, push, and sign a modelcar OCI artifact -- same processes and
+# controls as thor-edge-build (tekton/02-pipeline.yaml): built on the hub
+# cluster in thor-builds, pushed to the hub's internal registry, signed by
+# the same cosign-sign Task against the same internal RHTAS Rekor. The only
+# difference from the OS image pipeline is the packaging step: this uses
+# tekton/07-package-modelcar-task.yaml (crane append) instead of
+# buildah-cross-arch, because the modelcar has no build logic (no RUN steps)
+# and buildah's build-graph machinery was measured taking hours on a single
+# large data layer in this cluster (fuse-overlayfs, not native kernel
+# overlay -- see DECISIONS.md D014 for the full trace).
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: cosmos3-edge-modelcar-build
+  namespace: thor-builds
+spec:
+  description: Download, package, push, and sign the Cosmos3-Edge modelcar OCI artifact.
+  params:
+    - name: git-url
+      type: string
+      default: https://github.com/jeremyary/thor-testing.git
+    - name: git-revision
+      type: string
+      default: main
+    - name: image-tag
+      type: string
+      default: latest
+    - name: model-repos
+      type: array
+      default:
+        - "nvidia/Cosmos3-Edge"
+        - "nvidia/Cosmos-1.0-Guardrail"
+        - "Qwen/Qwen3Guard-Gen-0.6B"
+      description: >-
+        HF repo ids this modelcar needs to bundle -- the model plus whatever
+        it loads internally at runtime, not the whole HF cache (see
+        modelcar/stage-context.sh for how this list was derived).
+    - name: registry-route
+      type: string
+      default: default-route-openshift-image-registry.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com
+      description: External registry route (used for signing and device pull)
+    - name: rekor-url
+      type: string
+      default: https://rekor-server-trusted-artifact-signer.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com
+      description: RHTAS Rekor transparency log URL
+  workspaces:
+    - name: shared-workspace
+    - name: cosign-key
+    - name: docker-credentials
+      optional: true
+  tasks:
+    - name: git-clone
+      taskRef:
+        resolver: cluster
+        params:
+          - name: kind
+            value: task
+          - name: name
+            value: git-clone
+          - name: namespace
+            value: openshift-pipelines
+      workspaces:
+        - name: output
+          workspace: shared-workspace
+      params:
+        - name: URL
+          value: $(params.git-url)
+        - name: REVISION
+          value: $(params.git-revision)
+        - name: DEPTH
+          value: "0"
+
+    - name: download-weights
+      taskRef:
+        name: download-hf-weights
+      runAfter:
+        - git-clone
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+      params:
+        - name: MODEL_REPOS
+          value: $(params.model-repos[*])
+        - name: OUTPUT_SUBDIR
+          value: modelcar/context/huggingface
+
+    - name: build-and-push
+      taskRef:
+        name: package-modelcar
+      runAfter:
+        - download-weights
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+        - name: dockerconfig
+          workspace: docker-credentials
+      params:
+        - name: IMAGE
+          value: image-registry.openshift-image-registry.svc:5000/thor-builds/cosmos3-edge-modelcar:$(params.image-tag)
+        - name: BASE_IMAGE
+          value: docker.io/library/python:3.12-slim
+        - name: LAYER_SOURCE_DIR
+          value: modelcar/context/huggingface
+        - name: LAYER_TARGET_PATH
+          value: models/huggingface
+        - name: PLATFORM
+          value: linux/arm64
+        - name: TLS_VERIFY
+          value: "false"
+
+    - name: sign-image
+      taskRef:
+        name: cosign-sign
+      runAfter:
+        - build-and-push
+      workspaces:
+        - name: cosign-key
+          workspace: cosign-key
+      params:
+        - name: IMAGE
+          value: $(params.registry-route)/thor-builds/cosmos3-edge-modelcar@$(tasks.build-and-push.results.IMAGE_DIGEST)
+        - name: REKOR_URL
+          value: $(params.rekor-url)
+        - name: REGISTRY_LOGIN
+          value: $(params.registry-route)

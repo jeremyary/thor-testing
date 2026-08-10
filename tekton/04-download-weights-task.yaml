@@ -1,0 +1,104 @@
+# This project was developed with assistance from AI tools.
+#
+# Downloads the HF Hub repos a modelcar image needs into the shared build
+# workspace, in the same on-disk cache layout (hub/models--org--name/{refs,
+# snapshots,blobs}) that HF_HOME/huggingface_hub expects -- so the resulting
+# tree can be COPY'd straight into a modelcar Containerfile unchanged and the
+# device-side initContainer copy (gitops/vllm-cosmos3/deployment.yaml) needs
+# no adjustment.
+#
+# This is the one deliberate, governed point where the pipeline talks to
+# huggingface.co: a controlled CI download during the build/promote step,
+# not an ungoverned pull from the device at runtime (D014). The resulting
+# artifact is then built, pushed, and signed exactly like the OS image
+# (buildah-cross-arch + cosign-sign, same Tasks, same registry, same Rekor).
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: download-hf-weights
+  namespace: thor-builds
+spec:
+  description: >-
+    Downloads one or more HuggingFace Hub repos into a workspace subdirectory
+    using the standard huggingface_hub cache layout, ready to be used as a
+    Containerfile COPY source for a modelcar image.
+  params:
+    - name: MODEL_REPOS
+      type: array
+      description: HF repo ids to download, e.g. ["nvidia/Cosmos3-Edge"]
+    - name: OUTPUT_SUBDIR
+      type: string
+      description: >-
+        Path, relative to the source workspace, to stage the HF cache into.
+        The final layout is <OUTPUT_SUBDIR>/hub/models--org--name/...
+      default: modelcar/context/huggingface
+    - name: GUARDRAIL_ALLOW_PATTERNS
+      type: array
+      description: >-
+        nvidia/Cosmos-1.0-Guardrail's full repo is ~17GB (bundles multiple
+        safety-filter model variants NVIDIA ships as options), but Thor's
+        live runtime cache only ever materialized ~130MB -- confirmed via
+        `find .../snapshots -type f -o -type l` on Thor: only
+        face_blur_filter/* and blocklist/* are actually read by
+        vllm-omni's Cosmos3 guardrails.py. snapshot_download() has no
+        per-repo pattern option, so this is applied only to that one repo
+        (see the download script below) to avoid re-introducing the same
+        17GB-vs-130MB bloat this task originally shipped with.
+      default:
+        - "face_blur_filter/*"
+        - "blocklist/*"
+  workspaces:
+    - name: source
+      description: Shared workspace also used by git-clone and the build task.
+  steps:
+    - name: download
+      image: docker.io/library/python:3.12-slim
+      args:
+        - $(params.MODEL_REPOS[*])
+        - "--"
+        - $(params.GUARDRAIL_ALLOW_PATTERNS[*])
+      env:
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-credentials
+              key: token
+        - name: HF_HUB_DISABLE_XET
+          value: "1"
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        pip install --no-cache-dir -q "huggingface_hub[cli]"
+
+        CACHE_DIR="$(workspaces.source.path)/$(params.OUTPUT_SUBDIR)/hub"
+        mkdir -p "${CACHE_DIR}"
+
+        # $@ here is the step's args: the expanded MODEL_REPOS array, a "--"
+        # separator, then the expanded GUARDRAIL_ALLOW_PATTERNS array.
+        # Tekton only supports array-param expansion in the step's args
+        # field, not pasted directly into a script body, and passing two
+        # arrays needs a separator since Tekton has no named-array params.
+        python3 - "${CACHE_DIR}" "$@" << 'PYEOF'
+        import sys
+        from huggingface_hub import snapshot_download
+
+        cache_dir = sys.argv[1]
+        rest = sys.argv[2:]
+        sep = rest.index("--")
+        repos, guardrail_patterns = rest[:sep], rest[sep + 1:]
+
+        for repo in repos:
+            kwargs = {}
+            if repo == "nvidia/Cosmos-1.0-Guardrail":
+                kwargs["allow_patterns"] = guardrail_patterns
+                print(f"--> Downloading {repo} (filtered: {guardrail_patterns}) into {cache_dir} ...")
+            else:
+                print(f"--> Downloading {repo} into {cache_dir} ...")
+            snapshot_download(repo_id=repo, cache_dir=cache_dir, **kwargs)
+
+        print("All repos downloaded.")
+        PYEOF
+
+        echo "Staged content:"
+        du -sh "${CACHE_DIR}"/* || true

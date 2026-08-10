@@ -1,0 +1,122 @@
+# This project was developed with assistance from AI tools.
+#
+# Packages a downloaded HF cache directory as a runnable OCI image by
+# appending it as a single layer onto a base image with `crane append`, and
+# pushes the result -- same registry, same namespace as everything else in
+# this pipeline. Same processes and controls as the OS image build
+# (thor-edge-build): built on the hub cluster, pushed to the hub's internal
+# registry, then signed by the same cosign-sign Task against the same
+# internal RHTAS Rekor (see tekton/05-modelcar-pipeline.yaml).
+#
+# Deliberately NOT buildah: the modelcar has no build logic (no RUN steps,
+# no Containerfile beyond a single COPY), it's pure data appended to a base
+# image. buildah's full build-graph machinery (`buildah bud`) was measured
+# taking hours-to-days to push a single ~10-27GB layer in this cluster --
+# root-caused to fuse-overlayfs (not native kernel overlay) inside the
+# Tekton pod, likely because the workspace PVC's CSI driver doesn't support
+# native overlay mounts. crane operates purely on OCI blobs/manifests
+# streamed directly to/from the registry API, with no container storage
+# driver involved at all, and was verified to push the same data in
+# seconds/minutes instead of hours. See DECISIONS.md D014.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: package-modelcar
+  namespace: thor-builds
+spec:
+  description: >-
+    Tars a workspace directory and appends it as a layer onto a base image
+    via `crane append`, pushing the result directly -- no Containerfile
+    build, no container storage driver.
+  params:
+    - name: IMAGE
+      type: string
+      description: Fully qualified image reference to push, e.g. registry/repo:tag
+    - name: BASE_IMAGE
+      type: string
+      default: docker.io/library/python:3.12-slim
+    - name: LAYER_SOURCE_DIR
+      type: string
+      description: >-
+        Path, relative to the source workspace, of the directory to tar up
+        and append as the new layer's root (e.g. its contents land at
+        /<LAYER_TARGET_PATH>/<contents> in the resulting image).
+    - name: LAYER_TARGET_PATH
+      type: string
+      description: Path inside the image the layer's contents should appear under.
+      default: models
+    - name: PLATFORM
+      type: string
+      default: linux/arm64
+    - name: TLS_VERIFY
+      type: string
+      default: "false"
+  results:
+    - name: IMAGE_URL
+      description: Fully qualified image name (without digest).
+    - name: IMAGE_DIGEST
+      description: Digest of the image just pushed.
+  workspaces:
+    - name: source
+    - name: dockerconfig
+      optional: true
+  steps:
+    - name: package-and-push
+      image: gcr.io/go-containerregistry/crane:debug
+      script: |
+        #!/busybox/sh
+        set -eu
+
+        if [ "$(workspaces.dockerconfig.bound)" = "true" ] && [ -f "$(workspaces.dockerconfig.path)/.dockerconfigjson" ]; then
+          mkdir -p /tekton/home/.docker
+          cp "$(workspaces.dockerconfig.path)/.dockerconfigjson" /tekton/home/.docker/config.json
+          export DOCKER_CONFIG=/tekton/home/.docker
+        fi
+
+        SRC_DIR="$(workspaces.source.path)/$(params.LAYER_SOURCE_DIR)"
+        if [ ! -d "${SRC_DIR}" ]; then
+          echo "ERROR: LAYER_SOURCE_DIR not found at ${SRC_DIR}" >&2
+          exit 1
+        fi
+
+        # busybox tar has no GNU --transform, so build the target path
+        # structure with cp instead of rewriting paths at tar time.
+        LAYER_ROOT="/tmp/layer-root"
+        LAYER_TAR="/tmp/layer.tar"
+        mkdir -p "${LAYER_ROOT}/$(params.LAYER_TARGET_PATH)"
+        echo "--> Copying ${SRC_DIR} to ${LAYER_ROOT}/$(params.LAYER_TARGET_PATH) ..."
+        cp -a "${SRC_DIR}/." "${LAYER_ROOT}/$(params.LAYER_TARGET_PATH)/"
+
+        echo "--> Tarring ${LAYER_ROOT} ..."
+        tar -C "${LAYER_ROOT}" -cf "${LAYER_TAR}" .
+        du -sh "${LAYER_TAR}"
+
+        TLS_FLAG=""
+        if [ "$(params.TLS_VERIFY)" = "false" ]; then
+          TLS_FLAG="--insecure"
+        fi
+
+        echo "--> Appending layer onto $(params.BASE_IMAGE) and pushing $(params.IMAGE) ..."
+        crane append ${TLS_FLAG} \
+          --platform "$(params.PLATFORM)" \
+          -b "$(params.BASE_IMAGE)" \
+          -f "${LAYER_TAR}" \
+          -t "$(params.IMAGE)" \
+          > /tmp/crane-output.txt
+
+        cat /tmp/crane-output.txt
+
+        # crane append prints "<repo>:<tag>" then "<repo>@<digest>" as its
+        # last two lines when a tag is supplied via -t.
+        DIGEST_LINE=$(tail -n1 /tmp/crane-output.txt)
+        DIGEST=$(echo "${DIGEST_LINE}" | sed -n 's/.*@\(sha256:[a-f0-9]*\).*/\1/p')
+
+        if [ -z "${DIGEST}" ]; then
+          echo "ERROR: could not parse digest from crane output" >&2
+          exit 1
+        fi
+
+        printf '%s' "$(params.IMAGE)" | sed 's/:[^:]*$//' > "$(results.IMAGE_URL.path)"
+        printf '%s' "${DIGEST}" > "$(results.IMAGE_DIGEST.path)"
+
+        echo "Pushed digest: ${DIGEST}"

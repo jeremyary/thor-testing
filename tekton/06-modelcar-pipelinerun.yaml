@@ -1,0 +1,27 @@
+# This project was developed with assistance from AI tools.
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: cosmos3-edge-modelcar-build-
+  namespace: thor-builds
+spec:
+  pipelineRef:
+    name: cosmos3-edge-modelcar-build
+  timeouts:
+    pipeline: 2h0m0s
+    tasks: 1h30m0s
+  workspaces:
+    - name: shared-workspace
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 30Gi
+    - name: cosign-key
+      secret:
+        secretName: cosign-signing-key
+    - name: docker-credentials
+      secret:
+        secretName: combined-registry-auth
