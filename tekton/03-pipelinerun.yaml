@@ -24,4 +24,4 @@ spec:
         secretName: cosign-signing-key
     - name: docker-credentials
       secret:
-        secretName: gitlab-pull-secret
+        secretName: combined-registry-auth
