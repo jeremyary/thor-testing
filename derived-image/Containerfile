@@ -84,8 +84,14 @@ RUN chmod +x /etc/greenboot/check/required.d/40_microshift_running.sh \
              /etc/greenboot/check/required.d/40_vllm_gpu.sh
 
 # --- Sigstore trust anchor ---
+# policy.json declares WHAT to require (sigstoreSigned for the internal
+# registry); registries.d declares WHERE/WHETHER to look for the signature
+# at all -- both are required, or pulls silently skip signature lookup
+# entirely and fail with "no signature exists" even for validly-signed
+# images. See DECISIONS.md D018.
 COPY config/policy.json /etc/containers/policy.json
 COPY config/cosign-signing.pub /etc/pki/containers/cosign-signing.pub
+COPY config/registries.d-internal-registry.yaml /etc/containers/registries.d/internal-registry.yaml
 
 # --- MicroShift configuration ---
 RUN mkdir -p /etc/microshift
