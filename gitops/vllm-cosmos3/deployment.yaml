@@ -6,6 +6,10 @@ metadata:
   namespace: vllm
 spec:
   replicas: 1
+  # Recreate, not RollingUpdate: Thor has exactly one GPU, so a surge pod
+  # can never schedule alongside the outgoing one (Insufficient nvidia.com/gpu).
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: cosmos3-edge
@@ -14,6 +18,19 @@ spec:
       labels:
         app: cosmos3-edge
     spec:
+      # D014: model weights ship as a signed OCI artifact (modelcar), not an
+      # ungoverned HuggingFace runtime download. The modelcar image is a data
+      # carrier only (see modelcar/Containerfile) -- this initContainer copies
+      # its baked-in HF cache into a shared emptyDir before the main container
+      # starts, then HF_HUB_OFFLINE=1 guarantees no network fallback.
+      initContainers:
+        - name: fetch-model
+          image: default-route-openshift-image-registry.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com/thor-builds/cosmos3-edge-modelcar:v1
+          imagePullPolicy: IfNotPresent
+          command: ["cp", "-a", "/models/huggingface", "/hf-cache/"]
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /hf-cache
       containers:
         - name: cosmos3
           image: docker.io/vllm/vllm-omni:cosmos3
@@ -32,11 +49,8 @@ spec:
               value: "0"
             - name: HF_HUB_DISABLE_XET
               value: "1"
-            - name: HF_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: hf-credentials
-                  key: token
+            - name: HF_HUB_OFFLINE
+              value: "1"
           resources:
             limits:
               nvidia.com/gpu: "1"
@@ -56,8 +70,7 @@ spec:
           hostPath:
             path: /usr/lib64/nvidia
         - name: hf-cache
-          hostPath:
-            path: /var/lib/models/huggingface
+          emptyDir: {}
         - name: scripts
           configMap:
             name: cosmos3-script

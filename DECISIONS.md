@@ -104,10 +104,17 @@ serving.
 
 ## D014: Model weights as modelcar OCI artifact in internal registry
 
-**Date:** 2026-08-07
+**Date:** 2026-08-07 (implemented 2026-08-10)
 **Decision:** Model checkpoints will be packaged as KServe modelcar OCI artifacts and stored in the internal OpenShift registry. Delivery to the device is via embedding in the bootc image (air-gapped) or via MicroShift ImageVolume mount (if supported). HuggingFace downloads at runtime are eliminated.
 **Rationale:** Model provenance is a safety-relevant property. An ungoverned HuggingFace download bypasses the trust plane. Packaging as an OCI artifact enables signing (RHTAS), versioning, and the same sigstore verification used for all other artifacts.
-**Status:** Architecture decided, implementation deferred to Phase 4 (training pipeline).
+**Status:** Implemented for the currently-running Cosmos3-Edge checkpoint (see `modelcar/`). Full production wiring (post-training pipeline outputs auto-packaged as modelcars) still deferred to Phase 4.
+**Implementation notes:**
+- `modelcar/Containerfile` packages the actual runtime dependency set — `nvidia/Cosmos3-Edge` plus the guardrail/safety models vLLM-Omni loads internally (`nvidia/Cosmos-1.0-Guardrail`, `Qwen/Qwen3Guard-Gen-0.6B`), ~10.2GB total — not the full HF cache on Thor, which also holds `ibm-granite/granite-3.2-2b-instruct` for the unrelated `serve-granite.sh` bare-podman deployment.
+- MicroShift's ImageVolume (native OCI-image-as-volume mount) wasn't attempted — likely alpha/unavailable on 4.22 RC5 — so delivery uses the more portable **initContainer copy** pattern instead: the modelcar image (based on `python:3.12-slim`, already cached on Thor, so it has `cp`) is pulled as an initContainer that copies its baked-in `/models/huggingface` into a shared `emptyDir`, which the main vLLM container mounts at `/root/.cache/huggingface`. `HF_HUB_OFFLINE=1` on the main container prevents any runtime network fallback. `HF_TOKEN`/`hf-credentials` Secret dependency removed from the Deployment.
+- Built and pushed directly on Thor via `podman` (avoids transferring ~10GB over the network twice); signed via `cosign` v2.4.1 from the Mac against the image digest (signing only touches the small manifest, not the layers).
+- **Gotcha:** cosign v3.1.3 (current Homebrew release) defaults to the OCI 1.1 "referrers" tag scheme (`sha256-<digest>`) for pushing signatures, which this OpenShift internal registry version rejects with a 500 `UNKNOWN` error. The existing signed OS image (`thor-edge`) uses the older cosign v2.x tag convention (`sha256-<digest>.sig`), matching the Tekton pipeline's pinned `COSIGN_VERSION: v2.4.1`. Fix: use cosign v2.4.1 for any manual/local signing against this registry until it's confirmed to support OCI 1.1 referrers (or the registry is upgraded).
+- **Gotcha:** the deployment's default `RollingUpdate` strategy can't roll a single-GPU pod — the surge pod fails to schedule (`Insufficient nvidia.com/gpu`) while the outgoing pod still holds it. Changed to `strategy: type: Recreate`.
+- **Gotcha:** an accidental first sign attempt omitted `--rekor-url`, so it logged to the public `rekor.sigstore.dev` instead of the internal RHTAS Rekor route before being corrected. Both signatures now exist on the image (cosign appends rather than replaces); the public entry contains only the image digest and public key, nothing sensitive, but is a process reminder to always pass `--rekor-url` explicitly for internal-registry artifacts per D015.
 
 ## D015: Sigstore policy scoped to internal registry
 

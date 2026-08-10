@@ -1,0 +1,33 @@
+# This project was developed with assistance from AI tools.
+#
+# Cosmos3-Edge modelcar: packages the model weights Cosmos3-Edge needs at
+# runtime (the model itself plus the guardrail/safety models vLLM loads
+# internally) as a signed OCI artifact, eliminating the ungoverned HuggingFace
+# runtime download (D014).
+#
+# This is a *data carrier* image, not something that runs standalone. It is
+# consumed via an initContainer in gitops/vllm-cosmos3/deployment.yaml, which
+# copies /models/huggingface into a shared emptyDir that the main vLLM
+# container mounts at /root/.cache/huggingface (HF_HUB_OFFLINE=1, no network
+# calls at runtime).
+#
+# Build context is a staging directory containing exactly the HF cache
+# subtrees this deployment actually needs (see modelcar/stage-context.sh) --
+# NOT the full /var/lib/models/huggingface cache, which also holds
+# ibm-granite/granite-3.2-2b-instruct (used by the unrelated serve-granite.sh
+# bare-podman deployment, not by MicroShift/vLLM-Omni).
+#
+# Build (on Thor, where the weights already live -- avoids a 10GB+ transfer):
+#   modelcar/stage-context.sh                 # stages huggingface/ into modelcar/context/
+#   podman build -t <registry>/thor-builds/cosmos3-edge-modelcar:<tag> \
+#     -f modelcar/Containerfile modelcar/context
+#   podman push <registry>/thor-builds/cosmos3-edge-modelcar:<tag>
+#
+# Sign (from anywhere with registry + cosign access -- signing only touches
+# the small manifest/signature, not the multi-GB layers):
+#   cosign sign --key ~/redhat/thor-signing.key --tlog-upload=true \
+#     <registry>/thor-builds/cosmos3-edge-modelcar@<digest>
+
+FROM docker.io/library/python:3.12-slim
+
+COPY huggingface /models/huggingface
