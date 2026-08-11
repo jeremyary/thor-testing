@@ -1,0 +1,127 @@
+# This project was developed with assistance from AI tools.
+#
+# PersesDashboard for the Physical AI Edge Flywheel.
+#
+# Data sources (all flow through the device-side OTel collector → hub Tempo):
+#
+# Traces:
+#   - robot-sim "episode" root spans (service.name=robot-sim)
+#     Attributes: episode.id, episode.scene, episode.ticks,
+#                 episode.avg_latency_ms, episode.has_failure
+#   - robot-sim "inference" child spans
+#     Attributes: inference.latency_ms, inference.model, inference.error
+#
+# Resource attributes stamped by the OTel collector on ALL signals:
+#   device.id=thor, device.type=jetson-agx-thor, model.version=cosmos3-edge-v1
+#
+# Metrics (Prometheus scrape of vLLM /metrics + hostmetrics receiver):
+#   - vLLM request metrics (vllm_request_*, vllm_generation_*)
+#   - Host CPU, memory, disk, load, network
+#
+# Logs (journald receiver):
+#   - microshift, crio, flightctl-agent, nvidia-gpu-reset units
+#
+apiVersion: perses.dev/v1alpha2
+kind: PersesDashboard
+metadata:
+  name: edge-flywheel
+  namespace: observability
+spec:
+  config:
+    display:
+      name: "Physical AI Edge Flywheel — Thor"
+    duration: 1h
+    refreshInterval: 30s
+    variables: []
+    layouts:
+      - kind: Grid
+        spec:
+          display:
+            title: "Robot-Sim Episode Traces"
+          items:
+            - content:
+                $ref: "#/panels/episodeTraces"
+              height: 8
+              width: 24
+              x: 0
+              "y": 0
+      - kind: Grid
+        spec:
+          display:
+            title: "Inference Latency"
+          items:
+            - content:
+                $ref: "#/panels/inferenceLatency"
+              height: 8
+              width: 24
+              x: 0
+              "y": 0
+      - kind: Grid
+        spec:
+          display:
+            title: "Episode Failures"
+          items:
+            - content:
+                $ref: "#/panels/episodeFailures"
+              height: 8
+              width: 24
+              x: 0
+              "y": 0
+    panels:
+      episodeTraces:
+        kind: Panel
+        spec:
+          display:
+            name: "Episode Traces (robot-sim → Cosmos3-Edge)"
+            description: "Root spans from robot-sim episodes. Each episode contains multiple inference child spans."
+          plugin:
+            kind: Table
+            spec: {}
+          queries:
+            - kind: TimeSeriesQuery
+              spec:
+                plugin:
+                  kind: TraceQuery
+                  spec:
+                    datasource:
+                      name: tempo-edge
+                    searchQuery: '{resource.service.name="robot-sim" && name="episode"}'
+      inferenceLatency:
+        kind: Panel
+        spec:
+          display:
+            name: "Inference Span Latency"
+            description: "Individual inference call durations from robot-sim to Cosmos3-Edge."
+          plugin:
+            kind: Table
+            spec: {}
+          queries:
+            - kind: TimeSeriesQuery
+              spec:
+                plugin:
+                  kind: TraceQuery
+                  spec:
+                    datasource:
+                      name: tempo-edge
+                    searchQuery: '{resource.service.name="robot-sim" && name="inference"}'
+      episodeFailures:
+        kind: Panel
+        spec:
+          display:
+            name: "Failed Episodes"
+            description: "Episodes where episode.has_failure=true (injected or real)."
+          plugin:
+            kind: Table
+            spec: {}
+          queries:
+            - kind: TimeSeriesQuery
+              spec:
+                plugin:
+                  kind: TraceQuery
+                  spec:
+                    datasource:
+                      name: tempo-edge
+                    searchQuery: '{resource.service.name="robot-sim" && name="episode" && span.episode.has_failure=true}'
+  instanceSelector:
+    matchLabels:
+      app.kubernetes.io/name: edge-perses

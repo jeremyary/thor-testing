@@ -46,6 +46,7 @@ gitops/
   vllm-cosmos3/          # Cosmos3-Edge deployment (modelcar initContainer), service, entrypoint
   flywheel/              # robot-sim, curator, sync-agent, edge-kafka, mirrormaker2
   edge-workloads/        # Smoke test, namespace
+  observability/         # Perses instance, Tempo datasource, edge-flywheel dashboard
 modelcar/                # Containerfile + stage script for Cosmos3-Edge modelcar OCI artifact
 tekton/
   00-buildah-cross-arch-task  # Privileged buildah for arm64 cross-builds
@@ -75,7 +76,7 @@ action-preview/          # Early PoC: text→video generation demo
 
 ### What's not yet done
 - **Phase 4 (training pipeline):** deferred — needs L40S GPU pool on OSD
-- **Perses dashboards:** COO installed, dashboards not yet created
+- **Perses dashboards:** `PersesDashboard`/`PersesDatasource` CRs created in `gitops/observability/` (D021), but the Perses server pod is not being deployed by the COO 1.5.1 operator (Service exists, no Deployment/Pod — `connection refused`). Dashboards will bind automatically once the server issue is resolved.
 - NodePort loopback on Thor: `localhost:30800` doesn't work (OVN hairpin issue), must use `10.0.0.42:30800`
 - Flywheel workloads default to replicas=0 — scale up for demos
 
@@ -94,7 +95,7 @@ action-preview/          # Early PoC: text→video generation demo
 
 ## Key Decisions / Learnings
 
-Twenty decisions documented in DECISIONS.md (D001–D020). Most impactful:
+Twenty-one decisions documented in DECISIONS.md (D001–D021). Most impactful:
 - **D008:** Static cosign keypair + RHTAS Rekor (not full keyless) — pragmatic trust plane without OIDC complexity
 - **D009:** qemu cross-build on x86 OSD nodes — no Graviton available, works with privileged SCC
 - **D010:** Embed workload images in bootc — Red Hat's documented air-gapped MicroShift pattern, single delivery vehicle
@@ -124,7 +125,7 @@ Key learning: the gap between "BuildConfig works" and "Tekton pipeline works" fo
 
 - `PROJECT-BRIEF.md` — full architecture vision, phased build plan, demo script outline
 - `DEPLOYMENT_GUIDE.md` — step-by-step reproducible setup (all phases)
-- `DECISIONS.md` — D001–D020 decision log with rationale
+- `DECISIONS.md` — D001–D021 decision log with rationale
 - `DEMO_RUNBOOK.md` — demo script with pre-flight checklist
 - `PHASE0-FINDINGS.md` — initial Thor audit (OS, GPU, networking, storage)
 - `UNDERSTANDING_THE_BUILD.md` — deep-dive on the centos-bootc-tegra + sidecar build chain

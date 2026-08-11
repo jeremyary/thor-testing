@@ -191,3 +191,15 @@ The fix is a single `snapshot_download('nvidia/Cosmos3-Edge', local_files_only=T
 **Files changed:** `gitops/vllm-cosmos3/entrypoint-configmap.yaml` (add `snapshot_download` resolution), `gitops/vllm-cosmos3/deployment.yaml` (restore `HF_HUB_OFFLINE=1`, remove `HF_TOKEN`/`hf-credentials`).
 
 **Status:** Implemented and verified. D014's trust story for model weights is now fully closed — no ungoverned HuggingFace network access at any point in the serving path.
+
+## D021: Perses dashboard manifests for edge flywheel observability
+
+**Date:** 2026-08-11
+**Decision:** Create `gitops/observability/` with `PersesDashboard`, `PersesDatasource`, and `Perses` instance CRs for the edge flywheel observability stack. The dashboard queries robot-sim episode/inference trace spans from Tempo via the `TempoDatasource` plugin, keyed on `resource.service.name="robot-sim"` and span names `episode`/`inference`. Three panels: episode trace table, inference latency table, and failed-episode filter (`span.episode.has_failure=true`).
+**Rationale:** D016 decided on Perses over Grafana for observability dashboards (GA in COO 1.5, console-integrated). The Perses instance, Tempo datasource, and a placeholder dashboard (`edge-flywheel`) were created manually on the hub cluster on 2026-08-07 but were not committed to this repo and had a configuration gap: the Perses CR lacked the `app.kubernetes.io/name: edge-perses` label that the `instanceSelector` on the datasource and dashboard require.
+**Implementation notes:**
+- The `Perses` CR spec is empty (`spec: {}`); the operator handles Perses server deployment. On COO 1.5.1, the operator creates a Service but **does not create a Deployment or Pod** for the Perses server — the Service endpoint has no backing pod, and all dashboard/datasource reconciliation fails with `connection refused`. This appears to be a COO/Perses operator issue, not a configuration error. The `Perses` CR status reports "created successfully" despite no server being functional. To be investigated separately.
+- The dashboard and datasource CRs are structurally correct (validated by the operator's reconciler reaching the API-call stage, not failing on schema validation). Once the Perses server is running, they should bind automatically.
+- All three CRs use `instanceSelector: matchLabels: app.kubernetes.io/name: edge-perses` to bind to the Perses instance.
+
+**Status:** Manifests committed in `gitops/observability/`. Dashboard will become functional once the Perses server deployment issue is resolved.

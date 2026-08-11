@@ -1,0 +1,13 @@
+# This project was developed with assistance from AI tools.
+#
+# Perses server instance for the Physical AI Edge Flywheel observability.
+# The instanceSelector on dashboards and datasources uses
+# app.kubernetes.io/name: edge-perses to bind to this instance.
+apiVersion: perses.dev/v1alpha2
+kind: Perses
+metadata:
+  name: edge-perses
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: edge-perses
+spec: {}

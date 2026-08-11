@@ -1,0 +1,16 @@
+# This project was developed with assistance from AI tools.
+apiVersion: perses.dev/v1alpha2
+kind: PersesDatasource
+metadata:
+  name: tempo-edge
+  namespace: observability
+spec:
+  config:
+    default: true
+    plugin:
+      kind: TempoDatasource
+      spec:
+        directUrl: http://tempo-edge-traces-query-frontend.observability.svc:3200
+  instanceSelector:
+    matchLabels:
+      app.kubernetes.io/name: edge-perses
