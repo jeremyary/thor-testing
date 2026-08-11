@@ -18,10 +18,16 @@
 # specific to the modelcar or its build tooling (buildah vs crane, D017).
 # It was invisible until now because every previously-pulled workload image
 # is public (hits policy.json's insecureAcceptAnything default branch), and
-# the OS image itself reaches the device via `bootc switch`'s own separate
-# ostree-based pull mechanism, not CRI-O's kubelet pull path.
+# earlier bootc images predated the sigstoreSigned policy rule entirely.
 #
-# See: `man containers-registries.d`, DECISIONS.md D018.
+# This config is required for BOTH CRI-O (kubelet workload/modelcar pulls)
+# and bootc (OS image pulls via `bootc switch`/`bootc upgrade`) — confirmed
+# via live testing in the D019 investigation. The `ostree-unverified-registry`
+# transport prefix in `rpm-ostree status` is misleading; bootc invokes
+# skopeo without `--insecure-policy`, so per-registry policy.json rules
+# (including sigstoreSigned) are enforced identically to CRI-O.
+#
+# See: `man containers-registries.d`, DECISIONS.md D018/D019.
 docker:
   default-route-openshift-image-registry.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com:
     use-sigstore-attachments: true

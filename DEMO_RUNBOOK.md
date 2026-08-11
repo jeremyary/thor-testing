@@ -153,10 +153,13 @@ Show RHTAS:
 - Rekor search UI: `rekor-search-ui-trusted-artifact-signer.apps.<cluster>`
 - Show the Rekor transparency log entry for the signed bootc image
 
-Show device policy:
+Show device policy (both files are required — D018/D019):
 ```bash
 ssh root@thor "cat /etc/containers/policy.json"
-# Show sigstoreSigned enforcement for internal-registry
+# sigstoreSigned rule for internal-registry — declares WHAT to require
+ssh root@thor "cat /etc/containers/registries.d/internal-registry.yaml"
+# use-sigstore-attachments: true — tells containers/image WHERE to find the signature
+# Both CRI-O (workload pulls) and bootc (OS image pulls) enforce this identically
 ```
 
 ### 3.2 Telemetry

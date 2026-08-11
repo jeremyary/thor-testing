@@ -711,7 +711,7 @@ COO provides OpenShift console UI plugins for distributed tracing and log correl
 | Arm64 builds | OpenShift BuildConfig + qemu-user-static | No Graviton machinepools on OSD; RHEM ImageBuild API only injects flightctl-agent |
 | Flywheel default | replicas: 0 | GPU coil whine during continuous inference; scale up manually for testing/demo |
 | Image signing | Static cosign keypair + RHTAS Rekor | Full keyless needs OIDC client registration; static keys prove the same trust mechanics with Rekor transparency |
-| Trust enforcement | sigstoreSigned in policy.json | CRI-O and bootc both respect containers-policy.json; unsigned images from internal-registry/thor-builds refused |
+| Trust enforcement | sigstoreSigned in policy.json + registries.d | CRI-O and bootc both enforce policy.json per-registry rules via skopeo/containers-image; unsigned images from internal-registry/thor-builds refused. `registries.d/internal-registry.yaml` with `use-sigstore-attachments: true` is required alongside policy.json (D018). bootc pull-path enforcement confirmed identical to CRI-O via live testing (D019). |
 | Air-gapped images | Embedded in bootc via skopeo + systemd loader | Red Hat's documented MicroShift disconnected pattern; no device-side registry needed |
 | OTel collector | RPM systemd service (not container) | Upstream contrib container fails on arm64; RPM gives host-level access to journald/GPU telemetry |
 | Build output | Internal OpenShift registry | Hub-side source of truth; devices receive images embedded in bootc, not pulled from external registry |
