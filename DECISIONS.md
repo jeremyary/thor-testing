@@ -175,3 +175,19 @@ serving.
 **Note on `ostree-unverified-registry` prefix:** this is a cosmetic/naming artifact of bootc using `ContainerPolicyAllowInsecure` as its default `SignatureSource`. It does not indicate that signatures are not verified — only that bootc does not pre-reject an `insecureAcceptAnything` default. The actual enforcement happens in skopeo. This naming has caused confusion in the ostree/bootc community before (see upstream `security.md` which addresses this explicitly).
 
 **Status:** Investigation complete. No gap. No code changes needed. D018's `registries.d` fix is confirmed necessary and sufficient for both CRI-O and bootc pull paths.
+
+## D020: Pre-resolve model path in entrypoint to close HF_TOKEN fallback gap
+
+**Date:** 2026-08-11
+**Decision:** Resolve the HF repo id (`nvidia/Cosmos3-Edge`) to its absolute local snapshot path in the entrypoint script *before* passing it to `vllm serve`, restoring `HF_HUB_OFFLINE=1` and eliminating the `HF_TOKEN`/`hf-credentials` Secret dependency entirely.
+**Rationale:** D014's modelcar OCI artifact delivers model weights as the primary, governed source, but left `HF_TOKEN` as a narrow fallback for a vllm-omni framework quirk: the `DiffusionWorker` subprocess (`pipeline_cosmos3.py:866-867`) sets `local_files_only = os.path.exists(od_config.model)`, where `od_config.model` is the bare repo id `"nvidia/Cosmos3-Edge"` — which doesn't exist as a filesystem path, so `os.path.exists()` returns `False` and `local_files_only` becomes `False`. Under `HF_HUB_OFFLINE=1`, the subsequent `AutoTokenizer.from_pretrained(..., local_files_only=False)` hard-fails because HF hub rejects any network call in offline mode.
+
+The fix is a single `snapshot_download('nvidia/Cosmos3-Edge', local_files_only=True)` call in the entrypoint, which returns the absolute snapshot path (e.g. `/root/.cache/huggingface/hub/models--nvidia--Cosmos3-Edge/snapshots/2a00e87e...`) without any network access. This resolved path is passed to `vllm serve` instead of the bare repo id. Now `os.path.exists(od_config.model)` returns `True` in the DiffusionWorker, all `from_pretrained` calls use `local_files_only=True`, and `HF_HUB_OFFLINE=1` works correctly.
+
+**Note:** vllm-omni already has `_resolve_model_to_local_path()` in `stage_init_utils.py:66` that does exactly this resolution — but it's only invoked when `model_subdir` or `tokenizer_subdir` is set in the engine args, not in the default path. This is an upstream gap; resolving in the entrypoint is a clean workaround that doesn't require patching the vendor image.
+
+**Verification:** deployed to Thor, confirmed via logs (`Resolved model path: /root/.cache/...`), vLLM serving from absolute path, guardrails initialized from local cache, live inference returned HTTP 200 with valid generated image — all with `HF_HUB_OFFLINE=1` and no HF_TOKEN network fallback.
+
+**Files changed:** `gitops/vllm-cosmos3/entrypoint-configmap.yaml` (add `snapshot_download` resolution), `gitops/vllm-cosmos3/deployment.yaml` (restore `HF_HUB_OFFLINE=1`, remove `HF_TOKEN`/`hf-credentials`).
+
+**Status:** Implemented and verified. D014's trust story for model weights is now fully closed — no ungoverned HuggingFace network access at any point in the serving path.

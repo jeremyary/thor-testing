@@ -64,7 +64,7 @@ action-preview/          # Early PoC: text→video generation demo
 ### What's working
 - **OS image pipeline:** Tekton git-clone → buildah arm64 cross-build → cosign sign + Rekor log (full run ~75 min)
 - **Modelcar pipeline:** Tekton git-clone → download-weights → crane append → cosign sign + Rekor log (~15 min)
-- **Model weights delivery:** Cosmos3-Edge + guardrail models packaged as signed modelcar OCI artifact (D014); delivered to device via initContainer copy pattern; `HF_TOKEN` kept as narrow fallback for one vllm-omni framework quirk (D014 gotcha, not fully closed)
+- **Model weights delivery:** Cosmos3-Edge + guardrail models packaged as signed modelcar OCI artifact (D014); delivered to device via initContainer copy pattern; entrypoint pre-resolves model path so `HF_HUB_OFFLINE=1` works correctly, no `HF_TOKEN`/network fallback (D020)
 - `bootc switch` from internal registry → Thor boots new image, MicroShift + all workloads come up
 - Cosmos3-Edge inference serving (text→image generation confirmed, 640x640 PNG output)
 - GPU operational: NVIDIA Thor SM_110, driver 595.78, CUDA 13.x
@@ -75,7 +75,6 @@ action-preview/          # Early PoC: text→video generation demo
 
 ### What's not yet done
 - **Phase 4 (training pipeline):** deferred — needs L40S GPU pool on OSD
-- **D014 HF_TOKEN fallback:** modelcar is the primary weight source, but `HF_TOKEN` remains as a narrow fallback for a vllm-omni framework quirk where `DiffusionWorker` subprocess doesn't resolve model_path to an absolute path. Closing this requires pre-resolving the snapshot path in the entrypoint script before `vllm serve`.
 - **Perses dashboards:** COO installed, dashboards not yet created
 - NodePort loopback on Thor: `localhost:30800` doesn't work (OVN hairpin issue), must use `10.0.0.42:30800`
 - Flywheel workloads default to replicas=0 — scale up for demos
@@ -95,7 +94,7 @@ action-preview/          # Early PoC: text→video generation demo
 
 ## Key Decisions / Learnings
 
-Nineteen decisions documented in DECISIONS.md (D001–D019). Most impactful:
+Twenty decisions documented in DECISIONS.md (D001–D020). Most impactful:
 - **D008:** Static cosign keypair + RHTAS Rekor (not full keyless) — pragmatic trust plane without OIDC complexity
 - **D009:** qemu cross-build on x86 OSD nodes — no Graviton available, works with privileged SCC
 - **D010:** Embed workload images in bootc — Red Hat's documented air-gapped MicroShift pattern, single delivery vehicle
@@ -105,6 +104,7 @@ Nineteen decisions documented in DECISIONS.md (D001–D019). Most impactful:
 - **D017:** crane (not buildah) for modelcar packaging in Tekton — order-of-magnitude faster for pure data artifacts with no build logic
 - **D018:** `registries.d` `use-sigstore-attachments` required alongside `policy.json` — both config surfaces needed for sigstore verification
 - **D019:** bootc enforces `policy.json` per-registry rules identically to CRI-O — the `ostree-unverified-registry` transport prefix is misleading; trust chain is intact for both OS image and workload pulls
+- **D020:** Pre-resolve model path in entrypoint — closes D014's HF_TOKEN fallback gap, fully air-gapped model serving with `HF_HUB_OFFLINE=1`
 
 Key learning: the gap between "BuildConfig works" and "Tekton pipeline works" for cross-arch builds is significant. Docker strategy in BuildConfig runs fully privileged; Tekton buildah does not by default. Production cross-arch Tekton pipelines need explicit privileged SCC and a custom Task.
 
@@ -124,7 +124,7 @@ Key learning: the gap between "BuildConfig works" and "Tekton pipeline works" fo
 
 - `PROJECT-BRIEF.md` — full architecture vision, phased build plan, demo script outline
 - `DEPLOYMENT_GUIDE.md` — step-by-step reproducible setup (all phases)
-- `DECISIONS.md` — D001–D019 decision log with rationale
+- `DECISIONS.md` — D001–D020 decision log with rationale
 - `DEMO_RUNBOOK.md` — demo script with pre-flight checklist
 - `PHASE0-FINDINGS.md` — initial Thor audit (OS, GPU, networking, storage)
 - `UNDERSTANDING_THE_BUILD.md` — deep-dive on the centos-bootc-tegra + sidecar build chain

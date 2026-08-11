@@ -15,9 +15,22 @@ data:
     torch.zeros(1, device='cuda')
     print('CUDA pre-init OK', flush=True)
 
+    # D014/D020: resolve the HF repo id to its absolute local snapshot path
+    # BEFORE passing it to vllm serve. This is necessary because vllm-omni's
+    # DiffusionWorker subprocess uses os.path.exists(od_config.model) to decide
+    # local_files_only -- with the bare repo id 'nvidia/Cosmos3-Edge' that check
+    # returns False, causing it to fall through to local_files_only=False, which
+    # breaks under HF_HUB_OFFLINE=1. The framework has _resolve_model_to_local_path
+    # (stage_init_utils.py:66) that does exactly this, but it's only called when
+    # model_subdir/tokenizer_subdir is set, not in the default path.
+    # Resolving here lets us restore HF_HUB_OFFLINE=1 and drop HF_TOKEN entirely.
+    from huggingface_hub import snapshot_download
+    model_path = snapshot_download('nvidia/Cosmos3-Edge', local_files_only=True)
+    print(f'Resolved model path: {model_path}', flush=True)
+
     import sys
     sys.argv = [
-        'vllm', 'serve', 'nvidia/Cosmos3-Edge', '--omni',
+        'vllm', 'serve', model_path, '--omni',
         '--host', '0.0.0.0', '--port', '8000',
         '--enforce-eager', '--gpu-memory-utilization', '0.5',
         '--max-model-len', '4096', '--init-timeout', '1800',
