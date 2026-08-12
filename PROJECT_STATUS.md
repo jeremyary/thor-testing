@@ -81,6 +81,7 @@ action-preview/          # Early PoC: text→video generation demo
 - NodePort loopback on Thor: `localhost:30800` doesn't work (OVN hairpin issue), must use `10.0.0.42:30800`
 - Flywheel workloads default to replicas=0 — scale up for demos
 - Stale/`UnexpectedAdmissionError` Cosmos3-Edge pods accumulate across reboots (single-GPU `Recreate` strategy + repeated reboots this session left several old ReplicaSet pods lingering in `Init:ContainerStatusUnknown`/`UnexpectedAdmissionError`) — cosmetic, the current pod always reaches `1/1 Running`, but worth a `kubectl delete` sweep before a demo and possibly a GitOps-side fix (pod GC / TTL) if it keeps recurring.
+- **vLLM-Omni image upgrade (D025):** `docker.io/vllm/vllm-omni:cosmos3` is pinned to an unreleased `0.25.0rc2` snapshot, one stable release behind current (`v0.26.0`) — researched, not applied (no cluster access in that research session). See `VLLM_OMNI_UPGRADE_RESEARCH.md` and the unmerged `research/vllm-omni-v0.26-upgrade` branch for the proposed diff and pending live-validation checklist.
 
 ### Gotchas discovered
 - **Privileged SCC required for cross-arch builds:** buildah + qemu-user-static segfaults under `pipelines-scc`. Created `buildah-cross-arch` Task (copy of standard buildah with `privileged: true`), granted `pipeline` SA `privileged` SCC in `thor-builds` namespace.
@@ -131,8 +132,9 @@ Key learning: the gap between "BuildConfig works" and "Tekton pipeline works" fo
 
 - `PROJECT-BRIEF.md` — full architecture vision, phased build plan, demo script outline
 - `DEPLOYMENT_GUIDE.md` — step-by-step reproducible setup (all phases)
-- `DECISIONS.md` — D001–D022 decision log with rationale
+- `DECISIONS.md` — D001–D025 decision log with rationale
 - `DEMO_RUNBOOK.md` — demo script with pre-flight checklist
 - `PHASE0-FINDINGS.md` — initial Thor audit (OS, GPU, networking, storage)
 - `UNDERSTANDING_THE_BUILD.md` — deep-dive on the centos-bootc-tegra + sidecar build chain
 - `VLLM_ON_THOR.md` — full path from boxed Thor to serving inference, all blockers and fixes
+- `VLLM_OMNI_UPGRADE_RESEARCH.md` — vLLM-Omni v0.26.0 upgrade research (D025), proposal only
