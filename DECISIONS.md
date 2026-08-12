@@ -371,3 +371,22 @@ No fixes were applied because there was nothing on the deprecation list to fix.
 **Status:** Audit complete. No gap. No code changes needed anywhere in the repo for cosign v4 deprecation risk.
 
 **Files changed:** `DECISIONS.md` (this entry) only.
+
+## D027: Perses server root-caused — likely owner-reference gap in COO's `uiplugin` controller, not a generic operator bug
+
+**Date:** 2026-08-12
+**Trigger:** picking up the long-standing "Perses server pod never deploys" item from D021/PROJECT_STATUS.md ("COO 1.5.1 operator issue — Service exists, no Deployment/Pod"). That description was accurate but shallow — this entry replaces it with a specific, evidenced mechanism.
+
+**Investigation:**
+- The `edge-perses` `Perses` CR (`perses.dev/v1alpha2`) reports `status.conditions: Available=True, Degraded=False` — a **false-positive**. Live-confirmed: `Service/edge-perses` exists with **zero endpoints**, no Deployment/StatefulSet/Pod backs it anywhere in the `observability` namespace.
+- The `cluster-observability-operator` pod (`openshift-operators`, running continuously since 2026-08-08) has produced **121 total log lines across its entire 4+ day lifetime**. Its only registered controller is named `uiplugin`. At startup it registers `EventSource` watches for `*v1alpha2.Perses`, `PersesDashboard`, `PersesDatasource`, and `PersesGlobalDatasource` alongside `UIPlugin` itself — but **zero reconcile log lines exist for `edge-perses` across its entire 3-day lifetime**, including immediately after a live, direct annotation edit made during this investigation specifically to force a reconcile attempt. No log output at all followed that edit.
+- The one `UIPlugin` object that does exist (`dashboards`, type `Dashboards`) reconciles fine and is `Available: True` — but it's the OpenShift **console** dashboards UI plugin, unrelated to provisioning a standalone Perses backend server. The `UIPlugin` CRD's `spec.type` enum (`Dashboards`, `TroubleshootingPanel`, `DistributedTracing`, `Logging`, `Monitoring`) has no `Perses`/server-provisioning option either.
+- No newer operator version is available to try: the catalog's only channel currently offers `cluster-observability-operator.v1.5.1` (the version already installed) — no upgrade path exists to chase.
+
+**Root-cause hypothesis (well-evidenced, not just plausible):** the `uiplugin` controller's actual `Reconcile()` loop is almost certainly keyed to `UIPlugin` objects. The `Perses`/`PersesDashboard`/etc. `EventSource` watches exist only to **re-enqueue an owning `UIPlugin`** when one of its owned child resources changes (the standard controller-runtime `Owns()` pattern) — not to independently reconcile any `Perses` object that shows up in the cluster. Our `edge-perses` CR was hand-created directly (D021, `spec: {}`), with **no owner reference to any `UIPlugin`**. An event on it therefore maps to zero owning `UIPlugin`s and enqueues nothing — explaining the total silence perfectly. The CR's `Available: True` status is most likely stamped by a lightweight admission webhook or CRD default, not by genuine reconciliation logic; nothing in this operator's actual control loop has ever processed it.
+
+**Conclusion:** creating a standalone `Perses` CR by hand was never a supported/working provisioning path against this specific installed operator version — the CRD schema permits it, but nothing consumes it. This is not fixable by tweaking our own YAML alone, and no operator upgrade is available to try instead.
+
+**Practical path forward (not implemented in this session — scoped as its own follow-up, not a quick fix):** hand-roll our own Perses server `Deployment`/`Service` in `gitops/observability/`, reusing the exact image the operator itself would have used (`registry.redhat.io/cluster-observability-operator/perses-rhel9@sha256:a811b9345d884ba1c575584bec9be1d2a237902164a99887458a82d07e7c2376`, read directly from the operator pod's own startup args). This matches this repo's established pattern of solving gaps in our own layer rather than chasing upstream (D004's NVIDIA device-plugin envvar strategy, D010's embedded workload images). Scoped separately because it requires understanding Perses's own Kubernetes-CR storage-backend config/RBAC to correctly wire up `PersesDashboard`/`PersesDatasource` consumption — a real feature build, not a config fix, and deserves its own dedicated pass rather than being improvised here.
+
+**Files changed:** `DECISIONS.md` (this entry), `PROJECT_STATUS.md` (tightened Perses bullet with this root cause).
