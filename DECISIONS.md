@@ -338,3 +338,36 @@ inference-serving code paths before calling it validated.
 
 **Files changed (addendum):** `gitops/vllm-cosmos3/deployment.yaml`
 (bumped to the resolved digest, then reverted to `:cosmos3`), this entry.
+
+## D026: Cosign v4 deprecation pre-audit — no actionable usage found, pipeline pin unaffected
+
+**Date:** 2026-08-12
+**Trigger:** intel-scan 2026-08-11, Supply Chain Security lens — cosign v3.1.2/v3.1.3 flagged as potentially the last v3.1.x line before v4 removes deprecated, legacy-bundle-era flags/subcommands (`--payload`, `cosign triangulate`, `cosign copy`, and similar).
+**Scope:** static, repo-wide grep for every `cosign` CLI invocation or flag/subcommand reference — Tekton YAML, shell scripts (inline Tekton `script:` blocks), markdown docs (including inline shell snippets), and code comments. No cluster access; nothing applied/deployed; this is a text-only audit.
+
+**Decision:** No code or doc changes required. A full inventory of every actual `cosign` CLI invocation in the repo (table below) found zero usage of anything on the v4 deprecation list (`--payload`, `cosign triangulate`, `cosign copy`, `--bundle`, legacy `verify-blob`/`verify-blob-attestation` bundle handling, `LocalSignedPayload`). One unrelated, pre-existing doc gap was flagged (not fixed — out of scope, see below).
+
+**Inventory — every actual `cosign` CLI invocation found in the repo:**
+
+| # | Location | Invocation | On v4 deprecation list? | Verdict |
+|---|----------|------------|--------------------------|---------|
+| 1 | `tekton/01-cosign-sign-task.yaml:53` | `cosign login "$REGISTRY_LOGIN" -u ignored -p "$SA_TOKEN"` | No | Fine, unaffected |
+| 2 | `tekton/01-cosign-sign-task.yaml:57-62` | `cosign sign --key=... --rekor-url=... --tlog-upload=true -y "$(params.IMAGE)"` | No | Fine, current OCI-image sign flow |
+| 3 | `DEPLOYMENT_GUIDE.md:533` | `cosign generate-key-pair --output-key-prefix=thor-signing` | No | Fine |
+| 4 | `DEPLOYMENT_GUIDE.md:534` | `cosign initialize --mirror=$TUF_URL --root=$TUF_URL/root.json` | No | Fine, current TUF-root API |
+| 5 | `DEPLOYMENT_GUIDE.md:541-543` | `COSIGN_PASSWORD="" cosign sign --key=thor-signing.key --rekor-url=$REKOR_URL --tlog-upload=true -y <image>` | No | Fine |
+| 6 | `modelcar/Containerfile:27-28` (comment) | `cosign sign --key ~/redhat/thor-signing.key --tlog-upload=true <registry>/...@<digest>` | No | Fine as-is; see adjacent finding below |
+
+No fixes were applied because there was nothing on the deprecation list to fix.
+
+**Reviewed and confirmed non-actionable (reference `cosign` but are not CLI invocations):** `tekton/02-pipeline.yaml`, `03-pipelinerun.yaml`, `05-modelcar-pipeline.yaml`, `06-modelcar-pipelinerun.yaml` (workspace name `cosign-key` / Secret name `cosign-signing-key` only); `derived-image/Containerfile:128` and `derived-image/config/policy.json:12` (`cosign-signing.pub` file path only); `derived-image/config/registries.d-internal-registry.yaml` (generic prose comment, no CLI syntax); `gitops/vllm-cosmos3/deployment.yaml:31` (naming-convention comment only). `DECISIONS.md` D008/D014/D015/D017/D018/D019/D022's `cosign verify` / `cosign sign` / `verify-blob` / `verify-blob-attestation` / `--bundle` / `--rekor-url` mentions are narrative prose (CVE scope discussion, gotcha writeups, or — in D022's case — an explicit statement that the repo does *not* use `--bundle`/`verify-blob`/`LocalSignedPayload`), not runnable invocations. D014's and PROJECT_STATUS.md's "cosign v3 vs v2 tag scheme" gotcha is likewise informational (explains the v2.x pin) and contains no v3/v4 CLI syntax of its own.
+
+**Explicitly confirmed absent, repo-wide:** `--payload`, `cosign triangulate`, `cosign copy`, `--bundle`, `verify-blob`/`verify-blob-attestation` usage, `LocalSignedPayload`, `cosign save`/`cosign load`, `cosign upload`/`cosign attach`. Zero hits on any real invocation of these.
+
+**Adjacent finding, flagged not fixed (out of scope for a v4-deprecation audit):** `modelcar/Containerfile:27-28`'s manual-sign comment omits `--rekor-url`, reproducing the exact mistake D014 already logged as a gotcha ("always pass `--rekor-url` explicitly for internal-registry artifacts per D015" — an earlier manual sign attempt without it logged to the public `rekor.sigstore.dev` instead of the internal RHTAS Rekor). This isn't a deprecated flag — omitting a flag isn't a v4 compatibility issue — so it wasn't touched here, but it's the same "human copy-pastes a stale/incomplete example" risk this audit was checking for, just for a different underlying reason. Left for a future doc pass; noting it here so it isn't rediscovered from scratch.
+
+**Pipeline pin confirmation:** the repo's own signing pipeline (`tekton/01-cosign-sign-task.yaml`, `COSIGN_VERSION: v2.6.5`, per D022) is **not** affected by this advisory and needs no change. v4's deprecation list targets v3.1.x-era legacy-bundle flags/subcommands; the pinned v2.6.5 line predates and never used those flags (confirmed independently in D022's own CVE audit). This entry does not revisit or challenge D022's version-pin decision — that pin stays in the v2.x line per the OpenShift registry tag-scheme constraint (D014), unrelated to this audit's scope.
+
+**Status:** Audit complete. No gap. No code changes needed anywhere in the repo for cosign v4 deprecation risk.
+
+**Files changed:** `DECISIONS.md` (this entry) only.
