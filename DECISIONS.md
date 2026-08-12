@@ -258,3 +258,22 @@ The fix is a single `snapshot_download('nvidia/Cosmos3-Edge', local_files_only=T
 **Verification:** post-deletion, Cosmos3-Edge pod remains `1/1 Running` on Thor, unaffected (as expected — it never touched the deleted SA).
 
 **Files changed:** none in-repo (`thor-puller` and its RoleBinding were never GitOps-managed — created manually on the hub, matching the `thor-registry-pull`/`hf-credentials`/`cosign-signing-key` convention of hand-created, non-declarative cluster resources).
+
+## D025: vLLM-Omni v0.26.0 upgrade path researched (not implemented)
+
+**Date:** 2026-08-12
+**Status:** Research/proposal only. **No live changes made** — this environment has no cluster/SSH/Thor access. See `VLLM_OMNI_UPGRADE_RESEARCH.md` for the full writeup and the `research/vllm-omni-v0.26-upgrade` branch for the proposed (unmerged) `deployment.yaml` diff.
+
+**Task:** evaluate whether `docker.io/vllm/vllm-omni:cosmos3` (currently deployed) should move toward the feature set in upstream vLLM PR [#48952](https://github.com/vllm-project/vllm/pull/48952) ("Cosmos3 FP8 ModelOpt/Diffusers remapping"), described in the task as a "v0.27.x-era" feature.
+
+**Key findings:**
+- `:cosmos3` is not one of vllm-omni's own release tags (its official pipeline only ever produces `latest`/`v<version>`/`nightly[-sha]`). Cross-referenced against this repo's own `VLLM_ON_THOR.md` (written from live Thor investigation): `:cosmos3` is pinned to vLLM 0.25.0 + vllm-omni **0.25.0rc2** — an unreleased release candidate, one stable release behind current.
+- vllm-omni only stabilizes **even**-numbered vLLM minors (0.24, 0.26, ...). `v0.27.0` exists only as an rc1 tag and, per the project's stated policy, will not be promoted to stable — the "v0.27.x-era" framing in the task doesn't map onto any real stable vllm-omni release.
+- The actual fix that matters here — PR #48952 is a vanilla-vLLM fix for the *Reasoner* (`Cosmos3ForConditionalGeneration`) text model, not the `--omni` diffusion Generator path this deployment runs — already has its diffusion-path equivalent (vllm-omni PRs #5076/#5087, same author) shipped in the already-released **stable v0.26.0** (2026-08-03). No v0.27.x needed.
+- Bonus: v0.26.0 pins `torch==2.11.0` vs v0.27.0's `torch==2.13.0` — recommending v0.26.0 also avoids the PyTorch/Triton/FlashAttention-4 breaking-change risk called out in the task's own context, for free.
+- Verified against the v0.26.0 tag directly: the D020 `os.path.exists(model_path)`/`local_files_only` quirk this repo's custom entrypoint works around is **unchanged, byte-for-byte**, through v0.26.0. The entrypoint needs **no functional changes** for this upgrade — removing its `snapshot_download` pre-resolution step would be wrong and would reintroduce the `HF_HUB_OFFLINE=1` breakage D020 closed.
+- Docker Hub itself was unreachable from this research environment (confirmed via multiple failed transport-level probes, including a control test against `example.com`) — the existence/digest/arch-compatibility of a `v0.26.0` tag on `docker.io/vllm/vllm-omni` could not be directly confirmed, only inferred from the vllm-omni release pipeline's own publish scripts. This, and whether the generic multi-arch build is actually Thor/SM_110-compatible (vs. only server-class aarch64), are the biggest open risks — see the checklist in `VLLM_OMNI_UPGRADE_RESEARCH.md` §6.
+
+**Recommendation:** candidate bump to `docker.io/vllm/vllm-omni:v0.26.0`, proposed as an unmerged diff on `research/vllm-omni-v0.26-upgrade`. Do not merge/sync until the live-validation checklist in `VLLM_OMNI_UPGRADE_RESEARCH.md` is closed out on real Thor hardware — none of GPU behavior, inference correctness, or the version-coupling risk `VLLM_ON_THOR.md` already documents between vLLM/vllm-omni minor versions has been (or could be) empirically checked here.
+
+**Files changed:** `VLLM_OMNI_UPGRADE_RESEARCH.md` (new), this entry. `gitops/vllm-cosmos3/deployment.yaml` change lives only on the unmerged `research/vllm-omni-v0.26-upgrade` branch.
