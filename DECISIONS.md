@@ -277,3 +277,64 @@ The fix is a single `snapshot_download('nvidia/Cosmos3-Edge', local_files_only=T
 **Recommendation:** candidate bump to `docker.io/vllm/vllm-omni:v0.26.0`, proposed as an unmerged diff on `research/vllm-omni-v0.26-upgrade`. Do not merge/sync until the live-validation checklist in `VLLM_OMNI_UPGRADE_RESEARCH.md` is closed out on real Thor hardware — none of GPU behavior, inference correctness, or the version-coupling risk `VLLM_ON_THOR.md` already documents between vLLM/vllm-omni minor versions has been (or could be) empirically checked here.
 
 **Files changed:** `VLLM_OMNI_UPGRADE_RESEARCH.md` (new), this entry. `gitops/vllm-cosmos3/deployment.yaml` change lives only on the unmerged `research/vllm-omni-v0.26-upgrade` branch.
+
+---
+
+**Addendum: live-validated 2026-08-12, then reverted — real crash-loop regression found.**
+
+Resolved the digest (`crane digest docker.io/vllm/vllm-omni:v0.26.0` →
+`sha256:5cba1538c6f8ee81e8bea6708c24e68d7b2640f466a9fbf2ef15e68f2168b48b`),
+confirmed a genuine arm64 manifest entry via `crane manifest` (closing the
+biggest open risk above), and pinned by digest per D014 convention.
+
+**First pass (manual, out-of-band `oc set image`, before any GitOps merge):**
+clean Recreate rollout, pod reached `1/1 Running` in ~40s, CUDA pre-init OK,
+weights loaded (311/311), "Cosmos3 guardrails initialized." No errors. Looked
+like a clean pass. In hindsight this test window was too short — the crash
+below happens ~90s into the *server* startup phase, which this manual test's
+brief observation window didn't reach before Argo CD's `selfHeal: true`
+(on the `vllm-cosmos3-thor` Application, correctly, since main didn't yet
+have this change) reverted the manual edit back to `:cosmos3`.
+
+**Second pass (real GitOps merge to `main`, Argo CD sync):** merged the
+digest-pinned change, force-refreshed the `vllm-cosmos3-thor` Application,
+watched it actually apply. This time the pod ran long enough to reach real
+engine startup and **crash-looped**: `RuntimeError: Orchestrator
+initialization failed: You have disabled the safety checker for
+CosmosSafetyChecker. This is in violation of the NVIDIA Open Model License
+Agreement ... Please install cosmos-guardrail package to enable safety
+checks.` Confirmed via 2 consecutive restarts with identical tracebacks,
+~90s apart. **v0.26.0's guardrails implementation hard-requires a separate
+`cosmos-guardrail` PyPI package that this image does not have installed**,
+and refuses to silently disable the safety checker (unlike whatever the
+`:cosmos3` (0.25.0rc2) snapshot's guardrails did, which never hit this).
+
+**Immediately reverted** `deployment.yaml` back to `docker.io/vllm/vllm-omni:cosmos3`,
+force-refreshed Argo CD again, confirmed the pod returned to `1/1 Running`
+with 0 restarts and a real inference request (`POST /v1/chat/completions`)
+returned `HTTP 200` with a valid PNG. Total incident window: real service
+disruption from the crash-loop was brief (one Argo sync cycle plus
+diagnosis time) and self-contained to the `vllm` namespace's Cosmos3-Edge
+deployment — no impact to MicroShift, other flywheel workloads, or the OS
+image plane.
+
+**Lesson reinforced (matches the "verify against reality, not documentation"
+theme from this session's other findings, e.g. D023's flightctl-greenboot
+discovery):** a short manual smoke test that "looks clean" is not the same
+as an actual live-validation pass — the real bug only surfaced once the
+pod ran long enough, via the real deployment path, to reach the specific
+code path that broke. The research doc's own checklist was right to
+demand real hardware validation before merging; the mistake was treating
+the abbreviated manual test as satisfying that bar.
+
+**Next attempt, if pursued:** this is very likely fixable by adding the
+`cosmos-guardrail` PyPI package to the entrypoint's `pip install` step (or
+to a derived image layer) rather than the tag itself being wrong — v0.26.0
+still has the FP8 fix and the safer PyTorch pin, both still correct
+findings above. Re-attempt only with that dependency addressed, and budget
+enough live-observation time (several minutes past `1/1 Running`, not
+seconds) to actually reach and exercise the server-startup and
+inference-serving code paths before calling it validated.
+
+**Files changed (addendum):** `gitops/vllm-cosmos3/deployment.yaml`
+(bumped to the resolved digest, then reverted to `:cosmos3`), this entry.
