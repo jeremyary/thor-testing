@@ -40,7 +40,12 @@ spec:
             title: "Robot-Sim Episode Traces"
           items:
             - content:
-                $ref: "#/panels/episodeTraces"
+                # D028: Perses requires the full JSON-pointer path including
+                # "spec" (dashboard.go's checkAndSetRef expects exactly
+                # ["spec","panels",<name>]) -- "#/panels/<name>" (missing
+                # "spec") fails validation with "reference ... is pointing
+                # to the void", confirmed live against the real server.
+                $ref: "#/spec/panels/episodeTraces"
               height: 8
               width: 24
               x: 0
@@ -51,7 +56,7 @@ spec:
             title: "Inference Latency"
           items:
             - content:
-                $ref: "#/panels/inferenceLatency"
+                $ref: "#/spec/panels/inferenceLatency"
               height: 8
               width: 24
               x: 0
@@ -62,7 +67,7 @@ spec:
             title: "Episode Failures"
           items:
             - content:
-                $ref: "#/panels/episodeFailures"
+                $ref: "#/spec/panels/episodeFailures"
               height: 8
               width: 24
               x: 0
@@ -77,15 +82,31 @@ spec:
           plugin:
             kind: Table
             spec: {}
+          # D028: fixed the query shape against the real TempoTraceQuery
+          # plugin schema (perses/plugins tempo package.json + query.cue),
+          # confirmed live against the actual 400 errors this produced:
+          # - outer queries[].kind is the plugin CATEGORY ("TraceQuery"),
+          #   matching the TimeSeriesQuery/PrometheusTimeSeriesQuery
+          #   category/plugin pattern used elsewhere in Perses -- NOT
+          #   "TimeSeriesQuery" (wrong category for a trace search).
+          # - plugin.kind is the specific plugin NAME within that
+          #   category: "TempoTraceQuery", not the bare category name
+          #   "TraceQuery" (that was the actual "schema not found for
+          #   plugin TraceQuery" error).
+          # - plugin.spec only has `datasource: {kind: <plugin kind>}` and
+          #   `query: <string>` (CUE schema is closed -- no other fields
+          #   allowed): not `datasource: {name: ...}` and not
+          #   `searchQuery`. `kind: TempoDatasource` resolves to our
+          #   `default: true` datasource (tempo-datasource.yaml).
           queries:
-            - kind: TimeSeriesQuery
+            - kind: TraceQuery
               spec:
                 plugin:
-                  kind: TraceQuery
+                  kind: TempoTraceQuery
                   spec:
                     datasource:
-                      name: tempo-edge
-                    searchQuery: '{resource.service.name="robot-sim" && name="episode"}'
+                      kind: TempoDatasource
+                    query: '{resource.service.name="robot-sim" && name="episode"}'
       inferenceLatency:
         kind: Panel
         spec:
@@ -96,14 +117,14 @@ spec:
             kind: Table
             spec: {}
           queries:
-            - kind: TimeSeriesQuery
+            - kind: TraceQuery
               spec:
                 plugin:
-                  kind: TraceQuery
+                  kind: TempoTraceQuery
                   spec:
                     datasource:
-                      name: tempo-edge
-                    searchQuery: '{resource.service.name="robot-sim" && name="inference"}'
+                      kind: TempoDatasource
+                    query: '{resource.service.name="robot-sim" && name="inference"}'
       episodeFailures:
         kind: Panel
         spec:
@@ -114,14 +135,14 @@ spec:
             kind: Table
             spec: {}
           queries:
-            - kind: TimeSeriesQuery
+            - kind: TraceQuery
               spec:
                 plugin:
-                  kind: TraceQuery
+                  kind: TempoTraceQuery
                   spec:
                     datasource:
-                      name: tempo-edge
-                    searchQuery: '{resource.service.name="robot-sim" && name="episode" && span.episode.has_failure=true}'
+                      kind: TempoDatasource
+                    query: '{resource.service.name="robot-sim" && name="episode" && span.episode.has_failure=true}'
   instanceSelector:
     matchLabels:
       app.kubernetes.io/name: edge-perses

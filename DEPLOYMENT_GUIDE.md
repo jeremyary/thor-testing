@@ -277,11 +277,12 @@ gitops/
   edge-workloads/     # smoke test ConfigMap
   vllm-cosmos3/       # Cosmos3-Edge deployment, service, entrypoint, SCC
   flywheel/           # robot-sim, curator, sync-agent
+  observability/      # Perses instance, Tempo datasource, edge-flywheel dashboard, Perses Route (D021/D028)
 ```
 
 ### 4.2 ApplicationSets
 
-Each workload directory gets an ApplicationSet using the ACM cluster generator:
+Each edge-device workload directory gets an ApplicationSet using the ACM cluster generator (this targets Thor itself, via ACM placement — not the hub):
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -317,6 +318,8 @@ spec:
           - CreateNamespace=true
           - ServerSideApply=true
 ```
+
+`observability/` is the one exception: Perses/Tempo/the dashboard all run **on the hub itself**, not on Thor, so its ApplicationSet (`thor-testing-observability`) uses a plain `list` generator with a single `hub` element and targets `https://kubernetes.default.svc` in-cluster instead of the ACM cluster-decision generator above. Same `syncPolicy` (`automated: {prune: true, selfHeal: true}`, `CreateNamespace=true`/`ServerSideApply=true`). Not checked into `gitops/` as a YAML file, consistent with the other three ApplicationSets, which also exist only as live objects on the hub's `openshift-gitops` namespace (this doc is the source of truth for recreating any of them). See `DECISIONS.md` D028 for why it's shaped this way and the naming-collision incident to watch for when creating it (this hub is shared with other, unrelated projects — always check for an existing object with the intended name first).
 
 ### 4.3 Secrets (not in Git)
 

@@ -3,6 +3,20 @@
 # Perses server instance for the Physical AI Edge Flywheel observability.
 # The instanceSelector on dashboards and datasources uses
 # app.kubernetes.io/name: edge-perses to bind to this instance.
+#
+# D028: spec was `{}` from D021 through 2026-08-12 -- confirmed (by reading
+# perses-operator's own source, controllers/perses/deployment_controller.go
+# and statefulset_controller.go) that this is why no server pod ever
+# deployed. RequiresDeployment()/RequiresStatefulSet() gate workload
+# creation on spec.config.database being set; an empty spec matches
+# neither, so the operator creates the Service + ConfigMap and silently
+# skips the Deployment/StatefulSet while still reporting Available: True.
+# database.file + storage.emptyDir selects the Deployment path (vs. a PVC,
+# which would select StatefulSet) -- ephemeral by design: dashboards and
+# datasources are CR-sourced (PersesDashboard/PersesDatasource, pushed in
+# by perses-operator's own dashboard/datasource controllers), so they
+# survive a pod restart via re-push, and this is a demo dashboard, not a
+# system of record. See DECISIONS.md D028.
 apiVersion: perses.dev/v1alpha2
 kind: Perses
 metadata:
@@ -10,4 +24,24 @@ metadata:
   namespace: observability
   labels:
     app.kubernetes.io/name: edge-perses
-spec: {}
+spec:
+  config:
+    database:
+      file:
+        folder: /perses
+        extension: json
+  storage:
+    emptyDir: {}
+  # Without this, the operator defaults to fsGroup: 65534 (hardcoded,
+  # matching Red Hat's own console-plugin-integrated Perses pattern, which
+  # also grants its ServiceAccount `use` on the nonroot/nonroot-v2 SCC via
+  # a ClusterRole this standalone install doesn't have). That fsGroup was
+  # rejected by every SCC on this cluster ("65534 is not an allowed
+  # group" under restricted-v2). Omitting fsGroup here (CRD doc: "If
+  # unset, the Kubelet will not modify the ownership and permissions of
+  # any volume") lets restricted-v2 auto-assign a valid non-root UID/GID
+  # from this namespace's allocated range instead -- the Red Hat-built
+  # perses-rhel9 image is OpenShift-convention-friendly (group-0
+  # writable), so this doesn't need fsGroup to work.
+  podSecurityContext:
+    runAsNonRoot: true

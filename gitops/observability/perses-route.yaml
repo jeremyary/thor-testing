@@ -1,0 +1,25 @@
+# This project was developed with assistance from AI tools.
+#
+# D028: expose the Perses dashboard for partner demos. Open access (no
+# auth) behind edge TLS, matching the OTel collector routes already in
+# this namespace and the project's existing PoC-wide posture (the actual
+# demo centerpiece -- the Cosmos3-Edge inference NodePort -- has no auth
+# either). Locking down only the secondary observability dashboard while
+# leaving the primary workload API open would be inconsistent, not safer.
+# Auth (Perses's built-in OIDC/Kubernetes provider) is a real option to
+# add later as part of Phase 7 "Demo hardening" if this stack moves
+# beyond a PoC -- see DECISIONS.md D028's exposure rationale.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: edge-perses
+  namespace: observability
+spec:
+  to:
+    kind: Service
+    name: edge-perses
+  port:
+    targetPort: 8080
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
