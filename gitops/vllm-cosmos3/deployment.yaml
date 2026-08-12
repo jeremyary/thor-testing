@@ -54,23 +54,21 @@ spec:
               mountPath: /hf-cache
       containers:
         - name: cosmos3
-          # D025: bumped from the undocumented `:cosmos3` tag (confirmed via
-          # VLLM_ON_THOR.md live investigation to be an unreleased vllm-omni
-          # 0.25.0rc2 snapshot) to the official, stable v0.26.0 release, which
-          # already contains the Cosmos3 FP8 ModelOpt/Diffusers checkpoint-loading
-          # fix (vllm-omni #5076/#5087) relevant to this deployment's --omni
-          # diffusion path -- see VLLM_OMNI_UPGRADE_RESEARCH.md for the full
-          # research writeup. Pinned by digest per D014 convention (resolved via
-          # `crane digest docker.io/vllm/vllm-omni:v0.26.0`, multi-arch manifest
-          # list confirmed to include a real arm64 entry, not just amd64).
-          # Live-validated on Thor 2026-08-12: manual `oc set image` test (before
-          # this GitOps merge) showed a clean Recreate rollout, pod reached 1/1
-          # Running in ~40s with no CUDA/driver errors, guardrails initialized,
-          # weights loaded (311/311). See VLLM_OMNI_UPGRADE_RESEARCH.md's
-          # checklist and DECISIONS.md D025 for what remains to verify after
-          # this GitOps sync (actual inference request, FP8 checkpoint itself
-          # not yet available so that specific path is still unexercised).
-          image: docker.io/vllm/vllm-omni@sha256:5cba1538c6f8ee81e8bea6708c24e68d7b2640f466a9fbf2ef15e68f2168b48b
+          # D025 ROLLED BACK 2026-08-12: the v0.26.0 upgrade (previously here as
+          # a digest pin) crash-loops on real hardware -- v0.26.0's guardrails
+          # implementation hard-requires a separate `cosmos-guardrail` PyPI
+          # package not present in this image, and refuses to silently disable
+          # the safety checker (NVIDIA Open Model License compliance check):
+          # "RuntimeError: Orchestrator initialization failed: ... Please
+          # install cosmos-guardrail package to enable safety checks." Confirmed
+          # via 2 consecutive restarts on a deterministic ~90s crash cycle after
+          # a real GitOps sync (not just the earlier manual oc set image smoke
+          # test, which coincidentally didn't run long enough to hit this).
+          # Reverted to the known-good :cosmos3 tag. See DECISIONS.md D025's
+          # rollback addendum before attempting this upgrade again -- the fix
+          # is almost certainly adding cosmos-guardrail to the image/entrypoint,
+          # not just re-trying the same tag.
+          image: docker.io/vllm/vllm-omni:cosmos3
           imagePullPolicy: IfNotPresent
           command: ["bash", "/scripts/entrypoint.sh"]
           ports:
