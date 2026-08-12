@@ -61,6 +61,23 @@ RUN dnf install -y --setopt=install_weak_deps=False \
     && dnf clean all \
     && systemctl enable flightctl-agent.service
 
+# --- Mask flightctl's greenboot auto-configure service (D023) ---
+# flightctl-configure-greenboot.service runs before every
+# greenboot-healthcheck.service and unconditionally rewrites
+# /etc/greenboot/greenboot.conf's DISABLED_HEALTHCHECKS, blanket-disabling
+# any required.d script it doesn't recognize as core greenboot or its own
+# (name-matches "*flightctl*"). It ships with no allowlist/config knob for
+# device-owner-authored checks, so it silently re-disables our two custom
+# checks (40_microshift_running.sh, 40_vllm_gpu.sh) on every single boot,
+# regardless of greenboot.conf edits (those get overwritten before
+# greenboot even runs). Masking it here (baked into the image, not a local
+# /etc override that ostree could merge away) is the only way to keep our
+# checks actually enforced. Trade-off: we lose flightctl's own gating of
+# *other* unknown third-party checks too -- acceptable since these two are
+# the only third-party checks this image ships, both reviewed and
+# hardened with bounded retry loops. See DECISIONS.md D023.
+RUN systemctl mask flightctl-configure-greenboot.service
+
 # --- CRI-O 1.35, cri-tools, OVS 3.5, networking (from OCP deps mirror) ---
 ARG OCP_DEPS=https://mirror.openshift.com/pub/openshift-v4/aarch64/dependencies/rpms/4.22-el9-beta
 RUN cd /tmp && \

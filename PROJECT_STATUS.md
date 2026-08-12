@@ -17,7 +17,7 @@ PoC demonstrating an edge-to-cluster MLOps flywheel for Physical AI on NVIDIA Je
 ### Device (NVIDIA Jetson AGX Thor — 10.0.0.42)
 - **SoC:** T5000, Blackwell GPU (SM_110), 128GB unified LPDDR5X, 14 ARM Cortex-A720AE cores
 - **OS:** CentOS Stream 10 bootc image (derived FROM internal sidecar team's base), kernel 6.12, NVIDIA OpenRM driver 595.78
-- **Baked into OS image:** MicroShift 4.22, flightctl-agent (pinned 1.2.0, D022), greenboot (now actually installed, D022 — health checks were previously inert; the two custom checks remain locally disabled on Thor via a pre-existing, undocumented `/etc/greenboot/greenboot.conf` override, see gotchas), OTel collector (RPM/systemd), GPU reset service, embedded workload container images (air-gapped via skopeo dir: pattern), sigstore trust anchor (cosign pubkey + policy.json + registries.d)
+- **Baked into OS image:** MicroShift 4.22, flightctl-agent (pinned 1.2.0, D022), greenboot (D022/D023 — health checks were previously inert, now genuinely enforced: flightctl's `flightctl-configure-greenboot.service` masked so it can no longer blanket-disable them every boot, see gotchas), OTel collector (RPM/systemd), GPU reset service, embedded workload container images (air-gapped via skopeo dir: pattern), sigstore trust anchor (cosign pubkey + policy.json + registries.d)
 - **Workloads (GitOps-delivered via Argo CD):** Cosmos3-Edge via vLLM-Omni (NodePort 30800), edge Kafka, robot-sim, curator, sync-agent
 - **Management:** RHEM-enrolled, ACM ManagedCluster (Joined/Available), Argo CD via ACM cluster-proxy push model
 
@@ -76,10 +76,10 @@ action-preview/          # Early PoC: text→video generation demo
 
 ### What's not yet done
 - **Phase 4 (training pipeline):** deferred — needs L40S GPU pool on OSD
-- **Perses dashboards:** `PersesDashboard`/`PersesDatasource` CRs created in `gitops/observability/` (D021), but the Perses server pod is not being deployed by the COO 1.5.1 operator (Service exists, no Deployment/Pod — `connection refused`). Dashboards will bind automatically once the server issue is resolved.
+- **Perses dashboards:** `PersesDashboard`/`PersesDatasource` CRs created in `gitops/observability/` (D021), but the COO 1.5.1 operator never actually deploys a Perses server pod. Re-verified live 2026-08-12: the `Perses` CR itself reports `Available: True`/reconciled successfully (a false-positive status), a `Service/edge-perses` exists, but it has **zero endpoints** — no Deployment, StatefulSet, or Pod backs it anywhere in the namespace, and the operator's logs show no further Perses reconcile attempts. Dashboards will bind automatically once the server issue is resolved, but this looks like the operator giving up silently rather than an in-progress or transient state.
 - NodePort loopback on Thor: `localhost:30800` doesn't work (OVN hairpin issue), must use `10.0.0.42:30800`
 - Flywheel workloads default to replicas=0 — scale up for demos
-- **Follow-up from D022:** re-enable the `40_microshift_running.sh`/`40_vllm_gpu.sh` greenboot checks on Thor. They're currently disabled via a locally-persisted `/etc/greenboot/greenboot.conf` (`DISABLED_HEALTHCHECKS=(...)`) that isn't tracked anywhere in this repo and predates this session — discovered only because installing `greenboot` for the first time (D022) surfaced it. The GPU check has since been hardened with a retry loop, so it's likely now safe to re-enable, but that's a deliberate decision to make separately, not bundled into a CVE-remediation pass.
+- Stale/`UnexpectedAdmissionError` Cosmos3-Edge pods accumulate across reboots (single-GPU `Recreate` strategy + repeated reboots this session left several old ReplicaSet pods lingering in `Init:ContainerStatusUnknown`/`UnexpectedAdmissionError`) — cosmetic, the current pod always reaches `1/1 Running`, but worth a `kubectl delete` sweep before a demo and possibly a GitOps-side fix (pod GC / TTL) if it keeps recurring.
 
 ### Gotchas discovered
 - **Privileged SCC required for cross-arch builds:** buildah + qemu-user-static segfaults under `pipelines-scc`. Created `buildah-cross-arch` Task (copy of standard buildah with `privileged: true`), granted `pipeline` SA `privileged` SCC in `thor-builds` namespace.
@@ -94,10 +94,11 @@ action-preview/          # Early PoC: text→video generation demo
 - **flightctl-agent's hard `greenboot` dependency (D022):** pinning `flightctl-agent` to any stable release (1.1.x/1.2.x) requires the `greenboot` package to be installed — it's a hard `Requires`, dropped only in the `1.3.0~rc1` pre-release. `greenboot` isn't available from the flightctl EPEL10 repo or any other repo already configured in this Containerfile; it has to be pulled directly from the CentOS Stream 10 AppStream mirror.
 - **crane vs buildah for modelcar packaging (D017):** `buildah bud` with FUSE-backed `fuse-overlayfs` in Tekton pods has catastrophic throughput for multi-GB single-layer images (tens of KB/s sustained). `crane append` streams directly to/from the registry API and pushed ~10GB in under 5 minutes.
 - **Deployment strategy for single-GPU pods:** `RollingUpdate` can't roll a single-GPU pod — the surge pod fails to schedule (`Insufficient nvidia.com/gpu`). Changed to `strategy: type: Recreate`.
+- **flightctl-agent silently disables all third-party greenboot checks, every boot (D023):** `flightctl-configure-greenboot.service` runs before `greenboot-healthcheck.service` on every boot and unconditionally adds any `required.d/` script it doesn't recognize (core greenboot names or `*flightctl*`-named) to `DISABLED_HEALTHCHECKS` — no allowlist mechanism exists in flightctl-agent 1.2.0. A direct edit to `greenboot.conf` is a no-op; it gets overwritten before greenboot runs. Fix: mask `flightctl-configure-greenboot.service` in the image. Doing this surfaced a second, previously-undetectable bug: `40_microshift_running.sh` hardcoded `/usr/bin/oc`, but `oc` is installed to `/usr/local/bin/oc` — the check had never actually passed because it had never actually run. Both custom checks are genuinely enforced only as of this session; see D023.
 
 ## Key Decisions / Learnings
 
-Twenty-two decisions documented in DECISIONS.md (D001–D022). Most impactful:
+Twenty-three decisions documented in DECISIONS.md (D001–D023). Most impactful:
 - **D008:** Static cosign keypair + RHTAS Rekor (not full keyless) — pragmatic trust plane without OIDC complexity
 - **D009:** qemu cross-build on x86 OSD nodes — no Graviton available, works with privileged SCC
 - **D010:** Embed workload images in bootc — Red Hat's documented air-gapped MicroShift pattern, single delivery vehicle
@@ -109,6 +110,7 @@ Twenty-two decisions documented in DECISIONS.md (D001–D022). Most impactful:
 - **D019:** bootc enforces `policy.json` per-registry rules identically to CRI-O — the `ostree-unverified-registry` transport prefix is misleading; trust chain is intact for both OS image and workload pulls
 - **D020:** Pre-resolve model path in entrypoint — closes D014's HF_TOKEN fallback gap, fully air-gapped model serving with `HF_HUB_OFFLINE=1`
 - **D022:** cosign v2.6.5 + pinned flightctl-agent 1.2.0 — CVE remediation (GHSA-fx35-mq7g-6g98, CVE-2026-32280/33186/33815/39821); surfaced and fixed a real greenboot rollback hazard along the way
+- **D023:** Masked flightctl's `configure-greenboot.service` (it silently disabled the two custom greenboot checks every boot, with no allowlist mechanism) and fixed a latent `oc` path bug the masking had been hiding — neither custom check had ever actually run before this session
 
 Key learning: the gap between "BuildConfig works" and "Tekton pipeline works" for cross-arch builds is significant. Docker strategy in BuildConfig runs fully privileged; Tekton buildah does not by default. Production cross-arch Tekton pipelines need explicit privileged SCC and a custom Task.
 
@@ -119,7 +121,7 @@ Key learning: the gap between "BuildConfig works" and "Tekton pipeline works" fo
 - **Thor SSH:** `ssh thor` (10.0.0.42), key-based auth, root sudo
 - **Hub cluster:** `api.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com:6443`, user `jary@redhat.com`
 - **Internal registry route:** `default-route-openshift-image-registry.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com`
-- **Image currently on Thor:** `sha256:e3b8c951355312498c4666b9dafde1df8e8594eae152b52e9703dfb00c353c83` (D022: cosign v2.6.5-signed, flightctl-agent 1.2.0, greenboot installed)
+- **Image currently on Thor:** `sha256:e3b8c951355312498c4666b9dafde1df8e8594eae152b52e9703dfb00c353c83` (D022: cosign v2.6.5-signed, flightctl-agent 1.2.0, greenboot installed). Note: D023's greenboot fix (masked service, corrected `oc` path) is applied live on the device but not yet baked into a freshly-built/signed image — next Tekton rebuild will be the first to ship it from source.
 - **Flywheel workloads** are defaulted to replicas=0 in gitops manifests — scale up with `oc scale` or edit manifests for demos
 - **combined-registry-auth** Secret expires in ~30 days (token created 2026-08-10) — will need refresh
 - **Demo runbook** exists at DEMO_RUNBOOK.md — 15-minute three-act demo structure with pre-flight checklist

@@ -11,7 +11,7 @@ WAIT_SECONDS=10
 
 for i in $(seq 1 $MAX_ATTEMPTS); do
     if [ -f "$KUBECONFIG" ] && \
-       KUBECONFIG="$KUBECONFIG" /usr/bin/oc get --raw /readyz 2>/dev/null | grep -q "ok"; then
+       KUBECONFIG="$KUBECONFIG" /usr/local/bin/oc get --raw /readyz 2>/dev/null | grep -q "ok"; then
         echo "greenboot: MicroShift API server is ready (attempt $i/$MAX_ATTEMPTS)"
         exit 0
     fi
