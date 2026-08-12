@@ -247,3 +247,14 @@ The fix is a single `snapshot_download('nvidia/Cosmos3-Edge', local_files_only=T
 **Verification:** post-fix reboot confirmed clean: MicroShift active, flightctl-agent active, ACM `ManagedClusterConditionAvailable=True`, Cosmos3-Edge pod reaches `1/1 Running` within ~90s of boot. Pre-existing stale/`UnexpectedAdmissionError` Cosmos3-Edge pods observed churning across the two reboots this session are a known, separate GitOps/single-GPU-`Recreate`-strategy issue (see PROJECT_STATUS.md gotchas) — not caused by this change, not addressed here.
 
 **Files changed:** `derived-image/Containerfile` (mask flightctl-configure-greenboot.service), `derived-image/greenboot/40_microshift.sh` (`/usr/bin/oc` → `/usr/local/bin/oc`). Live device state (`/etc/greenboot/greenboot.conf`, masked service, corrected `/etc/greenboot/check/required.d/40_microshift_running.sh`) matches the repo changes; not yet re-verified against a fresh Tekton-built image (next rebuild will be the first to bake this in from a clean build rather than live patching).
+
+## D024: Consolidate redundant thor-puller / thor-edge-puller ServiceAccounts
+
+**Date:** 2026-08-12
+**Decision:** Deleted `thor-puller` (SA, its `system:image-puller` RoleBinding, and its auto-generated `dockercfg` secret) from `thor-builds` on the hub. Kept `thor-edge-puller`.
+
+**Investigation:** Both SAs grant `system:image-puller` scoped to `thor-builds`, created 3 days apart (`thor-puller` 2026-08-07, `thor-edge-puller` 2026-08-10). Traced `thor-edge-puller` to a real, active dependency: its token backs the `thor-registry-pull` Secret placed manually in Thor's own MicroShift `vllm` namespace (see `gitops/vllm-cosmos3/deployment.yaml`'s `imagePullSecrets`, and the commit that introduced it — Thor's CRI-O had no credentials for the hub's internal registry, needed for the pipeline-built modelcar's authenticated pull). Confirmed live: this token is a 1-year grant (expires 2027-08-10), currently in use. `thor-puller`, by contrast, has zero references anywhere — not in any manifest, not backing any Secret on the hub or on Thor, not used by any live pod/deployment/pipelinerun/taskrun (checked both clusters). It was an earlier, abandoned attempt before the naming settled on `thor-edge-puller`.
+
+**Verification:** post-deletion, Cosmos3-Edge pod remains `1/1 Running` on Thor, unaffected (as expected — it never touched the deleted SA).
+
+**Files changed:** none in-repo (`thor-puller` and its RoleBinding were never GitOps-managed — created manually on the hub, matching the `thor-registry-pull`/`hf-credentials`/`cosign-signing-key` convention of hand-created, non-declarative cluster resources).
