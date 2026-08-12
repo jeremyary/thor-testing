@@ -203,3 +203,22 @@ The fix is a single `snapshot_download('nvidia/Cosmos3-Edge', local_files_only=T
 - All three CRs use `instanceSelector: matchLabels: app.kubernetes.io/name: edge-perses` to bind to the Perses instance.
 
 **Status:** Manifests committed in `gitops/observability/`. Dashboard will become functional once the Perses server deployment issue is resolved.
+
+## D022: Cosign v2.6.5 and pinned flightctl-agent 1.2.0 for CVE remediation
+
+**Date:** 2026-08-12
+**Decision:** Bump the Tekton signing task's `COSIGN_VERSION` default from `v2.4.1` to `v2.6.5`, and pin `flightctl-agent` to an explicit NVR (`flightctl-agent-1.2.0-1.el10`) in the derived image Containerfile instead of an unversioned `dnf install`.
+
+**Rationale (cosign):** GHSA-fx35-mq7g-6g98 (High, CVSS 7.4) is a verification-bypass bug in `cosign verify-blob`/`verify-blob-attestation` when consuming legacy JSON bundles with a bare public key in the `cert` field — it lets an attacker skip OIDC identity/issuer pinning. Patched in v2.6.5 / v3.1.3.
+
+**Audit findings:** thor-testing's actual exposure was minimal — the advisory explicitly excludes OCI image verification (`cosign verify`), which is the only verification path this repo uses (via `policy.json`/`registries.d`, not the cosign CLI). `tekton/01-cosign-sign-task.yaml` only calls `cosign sign` against OCI images. A repo-wide grep confirmed zero usage of `--bundle`, `verify-blob`, or legacy `LocalSignedPayload` handling. The Mac's Homebrew cosign was already v3.1.3 (patched). Still bumped the Tekton pin to close the gap defensively and stay off an unsupported version. Stayed in the v2.x line (not v3.x) per D014's existing registry tag-scheme constraint — v2.6.5 is a patch release, not expected to change signature format, but this should be re-verified against the internal registry the first time the pipeline runs post-upgrade.
+
+**Rationale (flightctl-agent):** intel-scan flagged v1.1.3 as fixing CVE-2026-32280, CVE-2026-33186 (gRPC), CVE-2026-33815, CVE-2026-39821, plus an "updating" state hang when `boot-complete.target` exists without greenboot (directly relevant — Thor runs both). The Containerfile's `dnf install flightctl-agent` was unversioned, which is how Thor ended up running `1.3.0~rc1` — a pre-release build — simply because it was the newest package in the repo at enrollment time, not a deliberate choice.
+
+**Audit findings:** Thor's live agent (`1.3.0~rc1`) already postdates and supersedes the `1.1.3` fixes, so there was no live vulnerability at the time of this audit. The real gap was the *lack of pinning*, which is non-reproducible and could just as easily have landed on an older, vulnerable RC at a different build time. Chose to pin to `1.2.0-1.el10` — the latest **stable** (non-RC) release available in the repo — rather than downgrading to exactly `1.1.3`, since 1.2.0 is a superset of the 1.1.3 fixes and avoids shipping a pre-release build in a demo-facing image. This is a deliberate deviation from the literal "upgrade to v1.1.3" inbox item text in favor of the better outcome.
+
+**Risk:** Rebuilding the bootc image with a pinned (older than currently-running) flightctl-agent will be an effective downgrade from `1.3.0~rc1` to `1.2.0` stable on next `bootc switch`. Acceptable — RC builds should not be running in what is otherwise being treated as a demo-stable environment, and `1.2.0` still carries all target CVE fixes.
+
+**Verification:** confirmed both `flightctl-agent-1.2.0-1.el10.aarch64` resolves cleanly against the live `rpm.flightctl.io` EPEL10 repo, and Mac cosign version, via direct queries at implementation time. Full end-to-end verification (image build, sign, `bootc switch`, agent health, image pull signature verification) pending next pipeline run — see PROJECT_STATUS.md "What's not yet done" until closed out.
+
+**Files changed:** `tekton/01-cosign-sign-task.yaml` (COSIGN_VERSION default), `derived-image/Containerfile` (flightctl-agent pin).

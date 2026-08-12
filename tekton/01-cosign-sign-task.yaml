@@ -19,7 +19,14 @@ spec:
       default: ""
     - name: COSIGN_VERSION
       type: string
-      default: v2.4.1
+      # v2.6.5 patches GHSA-fx35-mq7g-6g98 (verify-blob/-attestation legacy
+      # bundle verification bypass). Not directly exploitable here -- this
+      # task only calls `cosign sign` against OCI images, and OCI image
+      # verification (cosign verify) is unaffected by the advisory -- but
+      # kept in the v2.x line (not v3.x) because the internal registry
+      # rejects v3's default OCI 1.1 referrers tag scheme (see DECISIONS.md
+      # D014/D022). Stay in sync with any future v2.x patch releases.
+      default: v2.6.5
   workspaces:
     - name: cosign-key
       description: Secret workspace containing cosign.key
