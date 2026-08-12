@@ -1,7 +1,7 @@
 ---
 project: thor-testing
 repo: git@github.com:jeremyary/thor-testing.git
-last_activity: 2026-08-11
+last_activity: 2026-08-12
 first_activity: 2026-08-07
 category: poc
 tags: [nvidia-thor, jetson, bootc, microshift, vllm, cosmos3, rhtas, sigstore, tekton, acm, rhem, flightctl, edge-ai, physical-ai, gitops, argo-cd, opentelemetry, kafka]
@@ -17,7 +17,7 @@ PoC demonstrating an edge-to-cluster MLOps flywheel for Physical AI on NVIDIA Je
 ### Device (NVIDIA Jetson AGX Thor — 10.0.0.42)
 - **SoC:** T5000, Blackwell GPU (SM_110), 128GB unified LPDDR5X, 14 ARM Cortex-A720AE cores
 - **OS:** CentOS Stream 10 bootc image (derived FROM internal sidecar team's base), kernel 6.12, NVIDIA OpenRM driver 595.78
-- **Baked into OS image:** MicroShift 4.22, flightctl-agent, greenboot health checks, OTel collector (RPM/systemd), GPU reset service, embedded workload container images (air-gapped via skopeo dir: pattern), sigstore trust anchor (cosign pubkey + policy.json + registries.d)
+- **Baked into OS image:** MicroShift 4.22, flightctl-agent (pinned 1.2.0, D022), greenboot (now actually installed, D022 — health checks were previously inert; the two custom checks remain locally disabled on Thor via a pre-existing, undocumented `/etc/greenboot/greenboot.conf` override, see gotchas), OTel collector (RPM/systemd), GPU reset service, embedded workload container images (air-gapped via skopeo dir: pattern), sigstore trust anchor (cosign pubkey + policy.json + registries.d)
 - **Workloads (GitOps-delivered via Argo CD):** Cosmos3-Edge via vLLM-Omni (NodePort 30800), edge Kafka, robot-sim, curator, sync-agent
 - **Management:** RHEM-enrolled, ACM ManagedCluster (Joined/Available), Argo CD via ACM cluster-proxy push model
 
@@ -79,6 +79,7 @@ action-preview/          # Early PoC: text→video generation demo
 - **Perses dashboards:** `PersesDashboard`/`PersesDatasource` CRs created in `gitops/observability/` (D021), but the Perses server pod is not being deployed by the COO 1.5.1 operator (Service exists, no Deployment/Pod — `connection refused`). Dashboards will bind automatically once the server issue is resolved.
 - NodePort loopback on Thor: `localhost:30800` doesn't work (OVN hairpin issue), must use `10.0.0.42:30800`
 - Flywheel workloads default to replicas=0 — scale up for demos
+- **Follow-up from D022:** re-enable the `40_microshift_running.sh`/`40_vllm_gpu.sh` greenboot checks on Thor. They're currently disabled via a locally-persisted `/etc/greenboot/greenboot.conf` (`DISABLED_HEALTHCHECKS=(...)`) that isn't tracked anywhere in this repo and predates this session — discovered only because installing `greenboot` for the first time (D022) surfaced it. The GPU check has since been hardened with a retry loop, so it's likely now safe to re-enable, but that's a deliberate decision to make separately, not bundled into a CVE-remediation pass.
 
 ### Gotchas discovered
 - **Privileged SCC required for cross-arch builds:** buildah + qemu-user-static segfaults under `pipelines-scc`. Created `buildah-cross-arch` Task (copy of standard buildah with `privileged: true`), granted `pipeline` SA `privileged` SCC in `thor-builds` namespace.
@@ -89,13 +90,14 @@ action-preview/          # Early PoC: text→video generation demo
 - **vLLM on Thor requires workarounds:** CUDA pre-init (`torch.zeros(1, device="cuda")`), `VLLM_ENABLE_V1_MULTIPROCESSING=0`, `HF_HUB_DISABLE_XET=1`. See D002/D003.
 - **NVIDIA device plugin must use envvar strategy:** CDI mode unsupported on Jetson (D004). Requires hostPath mount of `/usr/lib64/nvidia`.
 - **registries.d required alongside policy.json (D018):** `policy.json`'s `sigstoreSigned` rule declares *what* to require, but `registries.d` with `use-sigstore-attachments: true` is required for `containers/image` to actually look for the cosign signature. Without it, signed pulls fail silently. This was a pre-existing gap since the first bootc image, invisible because earlier images had no `sigstoreSigned` rule and the OS image was always pulled under `insecureAcceptAnything`.
-- **cosign v3 vs v2 tag scheme:** cosign v3.1.3 (Homebrew) defaults to OCI 1.1 referrers tag scheme, which this OpenShift registry version rejects with 500 `UNKNOWN`. Use cosign v2.4.1 (matching the Tekton pipeline) for manual signing against this registry.
+- **cosign v3 vs v2 tag scheme:** cosign v3.1.3 (Homebrew) defaults to OCI 1.1 referrers tag scheme, which this OpenShift registry version rejects with 500 `UNKNOWN`. Use cosign v2.6.5+ (matching the Tekton pipeline, D022) for manual signing against this registry.
+- **flightctl-agent's hard `greenboot` dependency (D022):** pinning `flightctl-agent` to any stable release (1.1.x/1.2.x) requires the `greenboot` package to be installed — it's a hard `Requires`, dropped only in the `1.3.0~rc1` pre-release. `greenboot` isn't available from the flightctl EPEL10 repo or any other repo already configured in this Containerfile; it has to be pulled directly from the CentOS Stream 10 AppStream mirror.
 - **crane vs buildah for modelcar packaging (D017):** `buildah bud` with FUSE-backed `fuse-overlayfs` in Tekton pods has catastrophic throughput for multi-GB single-layer images (tens of KB/s sustained). `crane append` streams directly to/from the registry API and pushed ~10GB in under 5 minutes.
 - **Deployment strategy for single-GPU pods:** `RollingUpdate` can't roll a single-GPU pod — the surge pod fails to schedule (`Insufficient nvidia.com/gpu`). Changed to `strategy: type: Recreate`.
 
 ## Key Decisions / Learnings
 
-Twenty-one decisions documented in DECISIONS.md (D001–D021). Most impactful:
+Twenty-two decisions documented in DECISIONS.md (D001–D022). Most impactful:
 - **D008:** Static cosign keypair + RHTAS Rekor (not full keyless) — pragmatic trust plane without OIDC complexity
 - **D009:** qemu cross-build on x86 OSD nodes — no Graviton available, works with privileged SCC
 - **D010:** Embed workload images in bootc — Red Hat's documented air-gapped MicroShift pattern, single delivery vehicle
@@ -106,6 +108,7 @@ Twenty-one decisions documented in DECISIONS.md (D001–D021). Most impactful:
 - **D018:** `registries.d` `use-sigstore-attachments` required alongside `policy.json` — both config surfaces needed for sigstore verification
 - **D019:** bootc enforces `policy.json` per-registry rules identically to CRI-O — the `ostree-unverified-registry` transport prefix is misleading; trust chain is intact for both OS image and workload pulls
 - **D020:** Pre-resolve model path in entrypoint — closes D014's HF_TOKEN fallback gap, fully air-gapped model serving with `HF_HUB_OFFLINE=1`
+- **D022:** cosign v2.6.5 + pinned flightctl-agent 1.2.0 — CVE remediation (GHSA-fx35-mq7g-6g98, CVE-2026-32280/33186/33815/39821); surfaced and fixed a real greenboot rollback hazard along the way
 
 Key learning: the gap between "BuildConfig works" and "Tekton pipeline works" for cross-arch builds is significant. Docker strategy in BuildConfig runs fully privileged; Tekton buildah does not by default. Production cross-arch Tekton pipelines need explicit privileged SCC and a custom Task.
 
@@ -116,7 +119,7 @@ Key learning: the gap between "BuildConfig works" and "Tekton pipeline works" fo
 - **Thor SSH:** `ssh thor` (10.0.0.42), key-based auth, root sudo
 - **Hub cluster:** `api.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com:6443`, user `jary@redhat.com`
 - **Internal registry route:** `default-route-openshift-image-registry.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com`
-- **Image currently on Thor:** `sha256:b3eb729e7d771683af726de97d5f7e6a584a12fb32ec03d0ed1ecb6e2eef6bf6`
+- **Image currently on Thor:** `sha256:e3b8c951355312498c4666b9dafde1df8e8594eae152b52e9703dfb00c353c83` (D022: cosign v2.6.5-signed, flightctl-agent 1.2.0, greenboot installed)
 - **Flywheel workloads** are defaulted to replicas=0 in gitops manifests — scale up with `oc scale` or edit manifests for demos
 - **combined-registry-auth** Secret expires in ~30 days (token created 2026-08-10) — will need refresh
 - **Demo runbook** exists at DEMO_RUNBOOK.md — 15-minute three-act demo structure with pre-flight checklist
@@ -125,7 +128,7 @@ Key learning: the gap between "BuildConfig works" and "Tekton pipeline works" fo
 
 - `PROJECT-BRIEF.md` — full architecture vision, phased build plan, demo script outline
 - `DEPLOYMENT_GUIDE.md` — step-by-step reproducible setup (all phases)
-- `DECISIONS.md` — D001–D021 decision log with rationale
+- `DECISIONS.md` — D001–D022 decision log with rationale
 - `DEMO_RUNBOOK.md` — demo script with pre-flight checklist
 - `PHASE0-FINDINGS.md` — initial Thor audit (OS, GPU, networking, storage)
 - `UNDERSTANDING_THE_BUILD.md` — deep-dive on the centos-bootc-tegra + sidecar build chain
