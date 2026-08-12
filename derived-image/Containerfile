@@ -79,9 +79,18 @@ RUN dnf install -y --setopt=install_weak_deps=False \
 RUN systemctl mask flightctl-configure-greenboot.service
 
 # --- CRI-O 1.35, cri-tools, OVS 3.5, networking (from OCP deps mirror) ---
+# NOTE (2026-08-12): this mirror path (4.22-el9-beta) only retains the
+# latest build per package -- it silently prunes older git-hash-pinned
+# RPMs as the OCP 4.22 beta channel advances. A build failed with a 404
+# on cri-o-1.35.5-3...git0adf62b (superseded by 1.35.6-4...git41f610b)
+# with no warning; cri-tools/openvswitch/microshift-networking happened
+# to still be current. Pinning exact filenames here is inherently fragile
+# against this mirror's retention behavior -- if this recurs, check
+# https://mirror.openshift.com/pub/openshift-v4/aarch64/dependencies/rpms/4.22-el9-beta/
+# for the current filename rather than assuming network/registry issues.
 ARG OCP_DEPS=https://mirror.openshift.com/pub/openshift-v4/aarch64/dependencies/rpms/4.22-el9-beta
 RUN cd /tmp && \
-    curl -fsSLO "${OCP_DEPS}/cri-o-1.35.5-3.rhaos4.22.git0adf62b.el9.aarch64.rpm" && \
+    curl -fsSLO "${OCP_DEPS}/cri-o-1.35.6-4.rhaos4.22.git41f610b.el9.aarch64.rpm" && \
     curl -fsSLO "${OCP_DEPS}/cri-tools-1.35.0-2.el9.aarch64.rpm" && \
     curl -fsSLO "${OCP_DEPS}/openvswitch3.5-3.5.2-72.el9fdp.2.aarch64.rpm" && \
     curl -fsSLO "https://mirror.openshift.com/pub/openshift-v4/aarch64/microshift/ocp/latest-4.22/el9/os/Packages/microshift-4.22.0~rc.5-202605271558.p0.g853f977.assembly.rc.5.el9__aarch64/microshift-networking-4.22.0~rc.5-202605271558.p0.g853f977.assembly.rc.5.el9.aarch64.rpm" && \
