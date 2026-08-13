@@ -188,7 +188,6 @@ def ingest_episodes(
     # cosmos-framework is installed at runtime from GitHub (pinned tag) to avoid baking
     # a 20GB image while still getting a reproducible framework version.
     base_image="nvcr.io/nvidia/pytorch:26.06-py3",
-    install_kfp_package=False,
     packages_to_install=[],
 )
 def finetune_cosmos3(
