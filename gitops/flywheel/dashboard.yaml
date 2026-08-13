@@ -179,25 +179,17 @@ data:
         mv     = get_model_version()
         d      = _dreams()
 
-        # Extract latest valid reasoning from episode
-        reasoning = scene = frame = curation_score = curation_reason = curation_verdict = None
+        # Extract Generator output from latest episode (D031 format)
+        scene = frame = curation_score = curation_reason = curation_verdict = None
+        generation = policy = None
         if ep:
             scene            = ep.get("scene")
             frame            = ep.get("frame_path")
             curation_score   = ep.get("curation_score")
             curation_reason  = ep.get("curation_reason", "")
             curation_verdict = ep.get("curation_verdict") or ep.get("_verdict")
-            for tick in reversed(ep.get("tick_data", [])):
-                r = tick.get("reasoning", {})
-                if r.get("valid"):
-                    reasoning = {
-                        "action_strategy": r.get("action_strategy", ""),
-                        "confidence":      round(float(r.get("confidence", 0)), 3),
-                        "select_action":   r.get("select_action", "good"),
-                        "reasoning_text":  r.get("reasoning", ""),
-                        "smoothness":      round(float(tick.get("action_smoothness", 0)), 4),
-                    }
-                    break
+            generation       = ep.get("generation")
+            policy           = ep.get("policy")
 
         return {
             "counts": {
@@ -219,7 +211,8 @@ data:
             "latest": {
                 "scene":            scene,
                 "frame":            frame,
-                "reasoning":        reasoning,
+                "generation":       generation,
+                "policy":           policy,
                 "curation_score":   curation_score,
                 "curation_reason":  curation_reason,
                 "curation_verdict": curation_verdict,
@@ -854,48 +847,55 @@ data:
           <div class="annotation" style="margin-top:6px">
             Real 256&times;256 robot image &mdash; NVIDIA BridgeData2 dataset
             (WidowX arm, UC Berkeley RAIL). Used as visual conditioning for
-            the Cosmos3-Edge Reasoner and Forward Dynamics dream.
+            the Cosmos3-Edge Action Policy and Forward Dynamics dream.
           </div>
         </div>
       </div>
 
-      <!-- REASONER OUTPUT -->
-      <div class="card" id="reasoner-card">
+      <!-- GENERATOR OUTPUT (D031) -->
+      <div class="card" id="generator-card">
         <div class="card-header">
-          <span class="card-title">Reasoner Output</span>
+          <span class="card-title">Generator Output</span>
           <span class="annotation" style="font-size:10px">
-            Cosmos3-Edge: image + instruction &rarr; structured action reasoning (D030-A)
+            Cosmos3-Edge Generator: Text&rarr;Image + Action Policy (D031)
           </span>
         </div>
-        <div class="card-body" id="reasoner-body">
-          <div id="reasoner-empty" style="color:var(--txt3);font-size:12px;padding:20px 0;text-align:center">
+        <div class="card-body" id="generator-body">
+          <div id="gen-empty" style="color:var(--txt3);font-size:12px;padding:20px 0;text-align:center">
             Awaiting first episode&hellip;
           </div>
-          <div id="reasoner-fields" style="display:none">
+          <div id="gen-fields" style="display:none">
             <div class="r-field">
-              <div class="r-label">action_strategy</div>
-              <div class="r-value" id="r-strategy">--</div>
+              <div class="r-label">Text&rarr;Image</div>
+              <div class="r-value" id="g-t2i-status">--</div>
             </div>
             <div class="r-field">
-              <div class="r-label">confidence</div>
-              <div class="r-value">
-                <div class="conf-bar-wrap">
-                  <div class="conf-bar"><div class="conf-fill" id="r-conf-fill" style="width:0%"></div></div>
-                  <div class="conf-num" id="r-conf-num">0.00</div>
-                </div>
-              </div>
+              <div class="r-label">image size</div>
+              <div class="r-value" id="g-t2i-size">--</div>
             </div>
             <div class="r-field">
-              <div class="r-label">select_action</div>
-              <div class="r-value" id="r-select">--</div>
+              <div class="r-label">T2I latency</div>
+              <div class="r-value" id="g-t2i-latency">--</div>
+            </div>
+            <div class="r-field" style="border-top: 2px solid var(--border); margin-top: 4px; padding-top: 10px;">
+              <div class="r-label">Action Policy</div>
+              <div class="r-value" id="g-policy-status">--</div>
+            </div>
+            <div class="r-field">
+              <div class="r-label">action chunk</div>
+              <div class="r-value" id="g-policy-chunk">--</div>
             </div>
             <div class="r-field">
               <div class="r-label">smoothness</div>
-              <div class="r-value" id="r-smooth">--</div>
+              <div class="r-value" id="g-policy-smooth">--</div>
             </div>
             <div class="r-field">
-              <div class="r-label">reasoning</div>
-              <div class="r-reasoning-text" id="r-text">--</div>
+              <div class="r-label">policy latency</div>
+              <div class="r-value" id="g-policy-latency">--</div>
+            </div>
+            <div class="r-field" style="border-top: 2px solid var(--border); margin-top: 4px; padding-top: 10px;">
+              <div class="r-label">curation</div>
+              <div class="r-value" id="g-curation">--</div>
             </div>
           </div>
         </div>
@@ -1152,27 +1152,46 @@ data:
         document.getElementById('scene-tag').textContent  = lat.scene;
       }
 
-      // Reasoner
-      if (lat.reasoning) {
-        const r = lat.reasoning;
-        document.getElementById('reasoner-empty').style.display = 'none';
-        document.getElementById('reasoner-fields').style.display = 'block';
-        document.getElementById('r-strategy').textContent = r.action_strategy || '--';
-        const conf = Math.round((r.confidence||0)*100);
-        document.getElementById('r-conf-fill').style.width = conf + '%';
-        document.getElementById('r-conf-num').textContent  = (r.confidence||0).toFixed(2);
+      // Generator output (D031)
+      if (lat.generation || lat.policy) {
+        document.getElementById('gen-empty').style.display = 'none';
+        document.getElementById('gen-fields').style.display = 'block';
 
-        const selEl = document.getElementById('r-select');
-        const good  = r.select_action === 'good';
-        selEl.innerHTML = `<span class="sel-badge ${good?'sel-good':'sel-bad'}">${good?'&#10003;':'&#10007;'} ${r.select_action||'--'}</span>`;
+        // Text-to-Image
+        const gen = lat.generation || {};
+        const genOk = gen.status === 'ok';
+        document.getElementById('g-t2i-status').innerHTML =
+          `<span class="sel-badge ${genOk ? 'sel-good' : 'sel-bad'}">${genOk ? '&#10003;' : '&#10007;'} ${gen.status || '--'}</span>`;
+        document.getElementById('g-t2i-size').textContent =
+          gen.image_size ? (gen.image_size > 1024 ? (gen.image_size/1024).toFixed(0) + ' KB' : gen.image_size + ' B') : '--';
+        document.getElementById('g-t2i-latency').textContent =
+          gen.latency_ms ? gen.latency_ms.toFixed(0) + ' ms' : '--';
 
-        const sm  = r.smoothness || 0;
+        // Action Policy
+        const pol = lat.policy || {};
+        const polOk = pol.status === 'ok';
+        document.getElementById('g-policy-status').innerHTML =
+          `<span class="sel-badge ${polOk ? 'sel-good' : pol.status === 'fallback' ? 'sel-bad' : 'sel-bad'}">${polOk ? '&#10003;' : '&#10007;'} ${pol.status || '--'}</span>`;
+        document.getElementById('g-policy-chunk').textContent =
+          pol.chunk_size ? pol.chunk_size + ' steps x ' + (pol.domain_name || '?') : '--';
+        document.getElementById('g-policy-latency').textContent =
+          pol.latency_ms ? pol.latency_ms.toFixed(0) + ' ms' : '--';
+
+        // Smoothness
+        const sm = pol.smoothness || 0;
         const cls = sm < 0.1 ? 'smooth-good' : sm < 0.2 ? 'smooth-warn' : 'smooth-bad';
         const lbl = sm < 0.1 ? 'plausible' : sm < 0.2 ? 'marginal' : 'jerky';
-        document.getElementById('r-smooth').innerHTML =
+        document.getElementById('g-policy-smooth').innerHTML =
           `<span class="smooth-pill ${cls}">&#9679; ${sm.toFixed(4)} &mdash; ${lbl}</span>`;
 
-        document.getElementById('r-text').textContent = r.reasoning_text || '';
+        // Curation
+        const score = lat.curation_score;
+        const verdict = lat.curation_verdict;
+        if (score != null) {
+          const sc = scoreClass(score);
+          document.getElementById('g-curation').innerHTML =
+            `<span class="sel-badge ${verdict === 'pass' ? 'sel-good' : 'sel-bad'}">${verdict === 'pass' ? '&#10003; PASS' : '&#10007; REJECT'}</span> <span class="${sc}">${score.toFixed(3)}</span>`;
+        }
       }
 
       // Dreams
@@ -1226,17 +1245,20 @@ data:
         const r = ep.curation_reason || '';
         if (r.includes('injected'))
           return 'Planted bad data \u2014 curator caught it, stays on Thor, never reaches hub';
-        if (r.includes('reasoning'))
-          return 'Model produced invalid JSON \u2014 low-quality reasoning signal, rejected';
-        if (r.includes('jerky') || r.includes('smoothness'))
-          return 'Jerky action trajectory selected \u2014 physically implausible, rejected';
+        if (r.includes('gen-failed'))
+          return 'Text\u2192Image generation failed \u2014 Generator could not produce coherent output';
+        if (r.includes('gen-tiny'))
+          return 'Generated image too small \u2014 likely degenerate output, rejected';
+        if (r.includes('policy-failed'))
+          return 'Action Policy prediction failed \u2014 no valid trajectory produced';
+        if (r.includes('jerky'))
+          return 'Predicted action trajectory is jerky \u2014 physically implausible, rejected';
         return 'Curation score below threshold \u2014 ' + r;
       }
-      const c = ep.avg_confidence || 0;
-      const s = ep.avg_smoothness || 0;
-      const g = ep.good_selections || 0;
-      const t = ep.ticks || 1;
-      return `Confidence ${c.toFixed(2)}, smoothness ${s.toFixed(3)}, ${g}/${t} good action selections`;
+      const gen = ep.generation || {};
+      const pol = ep.policy || {};
+      const s = ep.avg_smoothness || pol.smoothness || 0;
+      return `T2I: ${gen.status || '?'} (${((gen.image_size||0)/1024).toFixed(0)}KB), Policy: ${pol.status || '?'} (smoothness ${s.toFixed(3)})`;
     }
 
     function prependLogEntry(ep) {
