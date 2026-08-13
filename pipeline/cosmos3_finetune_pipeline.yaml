@@ -357,12 +357,16 @@ deploymentSpec:
           \ val_count, \"final_loss\": 0.0, \"framework\": \"cosmos-framework\"}\n\
           \        (out_dir / \"training_meta.json\").write_text(json.dumps(meta,\
           \ indent=2))\n        return 0.0\n\n    # -----------------------------------------------------------------------\n\
-          \    # Step 1: Install cosmos-framework from GitHub (pinned for reproducibility)\n\
+          \    # Step 1: Install cosmos-framework from GitHub (pinned to HEAD SHA).\n\
+          \    # The repo has no releases or tags as of 2026-08-13; pinning to a specific\n\
+          \    # commit SHA ensures reproducibility. Update this SHA when the upstream\n\
+          \    # repo stabilises or adds versioned releases (D030 note: check\n  \
+          \  # github.com/NVIDIA/cosmos-framework/tags before each real training run).\n\
           \    # -----------------------------------------------------------------------\n\
-          \    cf_tag = \"v0.1.0\"   # update to latest stable release tag as needed\n\
-          \    print(f\"[finetune] Installing cosmos-framework {cf_tag}...\")\n  \
-          \  subprocess.run([\n        sys.executable, \"-m\", \"pip\", \"install\"\
-          , \"--quiet\",\n        f\"git+https://github.com/NVIDIA/cosmos-framework.git@{cf_tag}\"\
+          \    cf_sha = \"b28c027628db987d8eaa558faedc1d37d11125ae\"  # main@2026-08-13\n\
+          \    print(f\"[finetune] Installing cosmos-framework @ {cf_sha[:12]}...\"\
+          )\n    subprocess.run([\n        sys.executable, \"-m\", \"pip\", \"install\"\
+          , \"--quiet\",\n        f\"git+https://github.com/NVIDIA/cosmos-framework.git@{cf_sha}\"\
           \n        \"#egg=cosmos_framework[cu130-train]\",\n    ], check=True)\n\n\
           \    # -----------------------------------------------------------------------\n\
           \    # Step 2: Convert nvidia/Cosmos3-Edge HF checkpoint to DCP format\n\

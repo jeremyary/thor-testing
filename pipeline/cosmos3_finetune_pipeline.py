@@ -235,13 +235,17 @@ def finetune_cosmos3(
         return 0.0
 
     # -----------------------------------------------------------------------
-    # Step 1: Install cosmos-framework from GitHub (pinned for reproducibility)
+    # Step 1: Install cosmos-framework from GitHub (pinned to HEAD SHA).
+    # The repo has no releases or tags as of 2026-08-13; pinning to a specific
+    # commit SHA ensures reproducibility. Update this SHA when the upstream
+    # repo stabilises or adds versioned releases (D030 note: check
+    # github.com/NVIDIA/cosmos-framework/tags before each real training run).
     # -----------------------------------------------------------------------
-    cf_tag = "v0.1.0"   # update to latest stable release tag as needed
-    print(f"[finetune] Installing cosmos-framework {cf_tag}...")
+    cf_sha = "b28c027628db987d8eaa558faedc1d37d11125ae"  # main@2026-08-13
+    print(f"[finetune] Installing cosmos-framework @ {cf_sha[:12]}...")
     subprocess.run([
         sys.executable, "-m", "pip", "install", "--quiet",
-        f"git+https://github.com/NVIDIA/cosmos-framework.git@{cf_tag}"
+        f"git+https://github.com/NVIDIA/cosmos-framework.git@{cf_sha}"
         "#egg=cosmos_framework[cu130-train]",
     ], check=True)
 
