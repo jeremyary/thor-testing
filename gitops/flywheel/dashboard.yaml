@@ -382,29 +382,29 @@ data:
     <title>Physical AI Edge Flywheel — Thor</title>
     <style>
     :root {
-      --bg:        #0e1014;
-      --card:      #16191f;
-      --card2:     #1e2229;
-      --border:    #2a2f3a;
-      --border2:   #353c4a;
-      --txt:       #dde1ea;
-      --txt2:      #7a8298;
-      --txt3:      #4a5168;
-      --green:     #22d3a5;
-      --green-dim: #1a9e7d;
-      --red:       #f04545;
-      --red-dim:   #7a2020;
-      --blue:      #4a9eff;
-      --blue-dim:  #1a4a8a;
-      --orange:    #f0983a;
+      --bg:        #f5f6f8;
+      --card:      #ffffff;
+      --card2:     #f0f1f3;
+      --border:    #d8dce3;
+      --border2:   #c4c9d4;
+      --txt:       #1a1d24;
+      --txt2:      #4a5168;
+      --txt3:      #8a90a2;
+      --green:     #0e8a62;
+      --green-dim: #b8e6d4;
+      --red:       #c9190b;
+      --red-dim:   #f5d2cf;
+      --blue:      #0066cc;
+      --blue-dim:  #c8dfff;
+      --orange:    #c46100;
       --rh-red:    #ee0000;
-      --gold:      #d4a017;
+      --gold:      #96690d;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       background: var(--bg);
       color: var(--txt);
-      font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+      font-family: 'Red Hat Text', system-ui, -apple-system, 'Segoe UI', sans-serif;
       font-size: 13px;
       line-height: 1.5;
       min-height: 100vh;
@@ -442,12 +442,11 @@ data:
       transition: all 0.4s ease;
     }
     #model-badge.v1 { border-color: var(--blue-dim); }
-    #model-badge.v2 { border-color: var(--green-dim); background: #0e2520; }
+    #model-badge.v2 { border-color: var(--green); background: var(--green-dim); }
     #model-dot {
       width: 8px; height: 8px; border-radius: 50%;
       background: var(--blue);
       transition: background 0.4s ease;
-      box-shadow: 0 0 6px currentColor;
     }
     #model-badge.v2 #model-dot { background: var(--green); }
 
@@ -459,14 +458,14 @@ data:
       transition: all 0.15s ease; white-space: nowrap;
       display: flex; align-items: center; gap: 5px;
     }
-    .btn-green  { background: #0e2e20; border-color: var(--green-dim); color: var(--green); }
-    .btn-green:hover { background: #143d2a; border-color: var(--green); }
-    .btn-red    { background: #2e1010; border-color: #7a2a2a; color: var(--red); }
-    .btn-red:hover { background: #3a1414; border-color: var(--red); }
-    .btn-blue   { background: #0e1e3a; border-color: var(--blue-dim); color: var(--blue); }
-    .btn-blue:hover { background: #122850; border-color: var(--blue); }
-    .btn-gold   { background: #2a1e08; border-color: #7a5a14; color: var(--gold); }
-    .btn-gold:hover { background: #382808; border-color: var(--gold); }
+    .btn-green  { background: var(--green-dim); border-color: var(--green); color: #065f44; }
+    .btn-green:hover { background: #a0dcc4; border-color: var(--green); }
+    .btn-red    { background: var(--red-dim); border-color: var(--red); color: #8b0000; }
+    .btn-red:hover { background: #f0b8b4; border-color: var(--red); }
+    .btn-blue   { background: var(--blue-dim); border-color: var(--blue); color: #003d7a; }
+    .btn-blue:hover { background: #aaccee; border-color: var(--blue); }
+    .btn-gold   { background: #f5e6c0; border-color: var(--gold); color: #6b4c08; }
+    .btn-gold:hover { background: #eed9a0; border-color: var(--gold); }
     .btn-gray   { background: var(--card2); border-color: var(--border); color: var(--txt2); }
     .btn-gray:hover { border-color: var(--border2); color: var(--txt); }
     .btn:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -498,6 +497,7 @@ data:
       border: 1px solid var(--border);
       border-radius: 8px;
       overflow: hidden;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.06);
     }
     .card-header {
       display: flex; align-items: center; justify-content: space-between;
@@ -515,7 +515,7 @@ data:
     #scene-card { grid-column: 1; grid-row: 1; }
     #scene-img-wrap {
       width: 100%; aspect-ratio: 1;
-      background: #0a0c10;
+      background: #e8eaee;
       border-radius: 4px;
       overflow: hidden;
       position: relative;
@@ -569,7 +569,7 @@ data:
     }
     .conf-fill {
       height: 100%;
-      background: linear-gradient(90deg, var(--blue), var(--green));
+      background: linear-gradient(90deg, #4a9eff, #22b890);
       border-radius: 3px;
       transition: width 0.4s ease;
     }
@@ -581,9 +581,9 @@ data:
       padding: 2px 8px; border-radius: 10px;
       font-size: 11px;
     }
-    .smooth-good { background: #0e2520; color: var(--green); }
-    .smooth-warn { background: #2a1e08; color: var(--gold);  }
-    .smooth-bad  { background: #2e1010; color: var(--red);   }
+    .smooth-good { background: var(--green-dim); color: #065f44; }
+    .smooth-warn { background: #f5e6c0; color: var(--gold);  }
+    .smooth-bad  { background: var(--red-dim); color: #8b0000;   }
 
     /* Select action badge */
     .sel-badge {
@@ -591,8 +591,8 @@ data:
       padding: 2px 9px; border-radius: 10px;
       font-size: 11px; font-weight: 600;
     }
-    .sel-good { background: #0e2520; color: var(--green); border: 1px solid var(--green-dim); }
-    .sel-bad  { background: #2e1010; color: var(--red);   border: 1px solid var(--red-dim);   }
+    .sel-good { background: var(--green-dim); color: #065f44; border: 1px solid var(--green); }
+    .sel-bad  { background: var(--red-dim); color: #8b0000;   border: 1px solid var(--red);   }
 
     /* ---- Flywheel progress ---------------------------------------------- */
     #progress-card { grid-column: 1 / -1; grid-row: 2; }
@@ -607,7 +607,7 @@ data:
     }
     #prog-fill {
       height: 100%;
-      background: linear-gradient(90deg, var(--blue), var(--green));
+      background: linear-gradient(90deg, #4a9eff, #22b890);
       border-radius: 5px;
       transition: width 0.6s ease;
       position: relative;
@@ -630,9 +630,9 @@ data:
     #prog-counts { font-size: 12px; color: var(--txt2); white-space: nowrap; }
     #trigger-banner {
       padding: 6px 14px;
-      background: linear-gradient(90deg, #0e2520, #0e2520 60%, transparent);
-      border-top: 1px solid var(--green-dim);
-      font-size: 11px; color: var(--green);
+      background: linear-gradient(90deg, var(--green-dim), var(--green-dim) 60%, transparent);
+      border-top: 1px solid var(--green);
+      font-size: 11px; color: #065f44;
       display: none;
     }
     #trigger-banner.show { display: block; }
@@ -654,7 +654,7 @@ data:
     .dream-panel {}
     .dream-video-wrap {
       aspect-ratio: 16/9;
-      background: #080a0c;
+      background: #e8eaee;
       border-radius: 6px;
       overflow: hidden;
       position: relative;
@@ -665,8 +665,8 @@ data:
       border-color: var(--border2);
     }
     .dream-video-wrap.v2.has-video {
-      border-color: var(--green-dim);
-      box-shadow: 0 0 20px rgba(34,211,165,0.1);
+      border-color: var(--green);
+      box-shadow: 0 0 12px rgba(14,138,98,0.15);
     }
     .dream-video {
       width: 100%; height: 100%;
@@ -714,8 +714,8 @@ data:
       from { opacity: 0; transform: translateY(-4px); }
       to   { opacity: 1; transform: translateY(0); }
     }
-    .log-entry.pass  { border-left: 3px solid var(--green-dim); }
-    .log-entry.reject{ border-left: 3px solid var(--red-dim); }
+    .log-entry.pass  { border-left: 3px solid var(--green); }
+    .log-entry.reject{ border-left: 3px solid var(--red); }
     .log-main {
       display: grid;
       grid-template-columns: 60px 70px 82px 80px 1fr;
@@ -765,7 +765,7 @@ data:
     /* ---- Notification toast --------------------------------------------- */
     #toast {
       position: fixed; bottom: 20px; right: 20px;
-      background: var(--card2);
+      background: var(--card);
       border: 1px solid var(--border2);
       border-radius: 8px;
       padding: 12px 18px;
@@ -775,11 +775,12 @@ data:
       transition: all 0.3s ease;
       z-index: 200;
       max-width: 320px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.1);
     }
     #toast.show { opacity: 1; transform: translateY(0); }
-    #toast.toast-green { border-color: var(--green-dim); color: var(--green); }
-    #toast.toast-blue  { border-color: var(--blue-dim);  color: var(--blue);  }
-    #toast.toast-gold  { border-color: #7a5a14;          color: var(--gold);  }
+    #toast.toast-green { border-color: var(--green); color: #065f44; background: var(--green-dim); }
+    #toast.toast-blue  { border-color: var(--blue);  color: #003d7a; background: var(--blue-dim);  }
+    #toast.toast-gold  { border-color: var(--gold);  color: #6b4c08; background: #f5e6c0;  }
 
     /* ---- Misc ----------------------------------------------------------- */
     .tag {
