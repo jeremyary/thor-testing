@@ -43,6 +43,7 @@ import kfp
 from kfp import dsl
 from kfp.kubernetes import (
     add_pod_label,
+    add_toleration,
     use_secret_as_volume,
 )
 
@@ -515,8 +516,11 @@ def cosmos3_finetune_pipeline(
     )
     # GPU resource request -- Kueue will queue this pod until an L40S node is available
     finetune_task.set_accelerator_type("nvidia.com/gpu").set_accelerator_limit(1)
-    # Kueue queue labels (must match the LocalQueue in vla-training namespace)
+    # Kueue queue label (must match the LocalQueue in vla-training namespace)
     add_pod_label(finetune_task, "kueue.x-k8s.io/queue-name", "robotics-train")
+    # Tolerate the GPU node taint: nvidia.com/gpu=L40S_SHARED:NoSchedule
+    add_toleration(finetune_task, key="nvidia.com/gpu", value="L40S_SHARED",
+                   effect="NoSchedule", operator="Equal")
 
     eval_task = evaluate(
         checkpoint      = finetune_task.outputs["checkpoint_out"],

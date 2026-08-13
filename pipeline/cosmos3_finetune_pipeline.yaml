@@ -748,6 +748,11 @@ platforms:
           podMetadata:
             labels:
               kueue.x-k8s.io/queue-name: robotics-train
+          tolerations:
+          - effect: NoSchedule
+            key: nvidia.com/gpu
+            operator: Equal
+            value: L40S_SHARED
         exec-open-promotion-pr:
           secretAsVolume:
           - mountPath: /etc/github
