@@ -1373,6 +1373,11 @@ kind: ServiceAccount
 metadata:
   name: dashboard
   namespace: flywheel
+  annotations:
+    # hostPath volumes require hostmount-anyuid SCC on MicroShift.
+    # Applied via: oc adm policy add-scc-to-user hostmount-anyuid -z dashboard -n flywheel
+    # Same pattern as robot-sim, curator, dreamer (scc-rolebinding.yaml).
+    openshift.io/scc-note: "hostmount-anyuid required for episode/dream/frame hostPath mounts"
 ---
 # Flywheel namespace: read + scale Deployments (for controls)
 apiVersion: rbac.authorization.k8s.io/v1
