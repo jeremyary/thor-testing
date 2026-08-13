@@ -145,7 +145,7 @@ data:
                     "size": "640x640",
                     "n": 1,
                     "response_format": "b64_json",
-                    "num_inference_steps": 10,
+                    "num_inference_steps": 25,
                     "guidance_scale": 5.0,
                     "seed": random.randint(0, 999999),
                     "extra_args": {
