@@ -7,16 +7,35 @@
 
 ~15-minute demo. Two screens: hub console/Perses (left), Thor terminal + output (right). Thor on the table with power meter inline.
 
+> [!WARNING]
+> **`combined-registry-auth` Secret expires 2026-09-11.** If running after that date, refresh it first:
+> `oc create token pipeline --duration=720h -n thor-builds` and rebuild the combined secret per
+> DEPLOYMENT_GUIDE.md § Registry Auth.
+
 ## Pre-Demo Checklist
 
-- [ ] Thor powered on, booted, MicroShift healthy (`oc get nodes` shows Ready)
-- [ ] Cosmos3-Edge model loaded and warm (check `curl http://thor:30800/v1/models`)
-- [ ] Flywheel workloads scaled to 0 (no GPU coil whine)
-- [ ] OCP console open: ACM cluster view, Edge Management, Argo CD
-- [ ] Tempo/tracing UI accessible
-- [ ] MinIO console open (episodes-curated bucket)
-- [ ] Kafka topic `episode-manifests` visible
-- [ ] Terminal SSH sessions ready: `ssh root@thor`
+**Hub-side (run from your laptop ~10 min before start)**
+
+- [ ] Thor powered on, booted, MicroShift healthy (`oc get nodes` shows Ready on Thor's MicroShift)
+- [ ] Combined-registry-auth Secret not expired (`oc get secret combined-registry-auth -n thor-builds`)
+- [ ] Cosmos3-Edge model loaded and warm — `curl http://10.0.0.42:30800/v1/models` returns the model
+- [ ] Flywheel workloads at replicas=0 (no GPU coil whine yet)
+- [ ] **MirrorMaker2 running** — edge→hub episode replication is OFF by default (replicas=0). Scale it up:
+  ```bash
+  ssh root@thor "KUBECONFIG=/var/lib/microshift/resources/kubeadmin/kubeconfig \
+    oc scale deployment mirrormaker2 -n flywheel --replicas=1"
+  ```
+- [ ] Manifest-consumer running in vla-training: `oc get pod -n vla-training -l app=manifest-consumer`
+- [ ] DSP UI accessible: `oc get route -n vla-training | grep ds-pipeline`
+- [ ] Hub Kafka topic ready: `oc get kafkatopic episode-manifests -n fleet-ops`
+- [ ] **Blue vLLM pod is the active side**: `oc get svc cosmos3-edge -n vllm -o jsonpath='{.spec.selector}'` → should show `color:blue`
+- [ ] Green deployment at replicas=0: `oc get deployment cosmos3-edge-green -n vllm -o jsonpath='{.spec.replicas}'` → `0`
+- [ ] Stale pods pre-cleared: `oc delete pod -n vllm --field-selector status.phase!=Running 2>/dev/null || true`
+- [ ] OCP console tabs open: ACM cluster view, Edge Management, Argo CD, DSP (vla-training)
+- [ ] Perses dashboard open: model.version v1 panel (blank until flywheel runs)
+- [ ] MinIO console open: `episodes-curated` bucket
+- [ ] Kafka consumer view open (Argo CD UI or Kafka console)
+- [ ] Terminal SSH sessions ready: `ssh thor` (all terminals pre-connected)
 - [ ] Fallback: full-run video recording available
 
 ### Warm-Up Commands (run 5 min before demo)
@@ -96,112 +115,216 @@ Show ACM: cluster blips to Unknown, then recovers to Available.
 
 ## Act 2 — The Flywheel Turns (~5 min)
 
-**Story:** The device generates training data, curates it on-device, and pushes to the hub.
+**Story:** The device generates training data, curates it on-device, pushes to the hub, and trips the training pipeline — with GPU nodes scaling from zero.
 
 ### 2.1 Start the Flywheel
 
 ```bash
-ssh root@thor "KUBECONFIG=/var/lib/microshift/resources/kubeadmin/kubeconfig oc scale deployment robot-sim curator -n flywheel --replicas=1"
+ssh thor "KUBECONFIG=/var/lib/microshift/resources/kubeadmin/kubeconfig \
+  oc scale deployment robot-sim curator sync-agent -n flywheel --replicas=1"
 ```
 
-**Talk track:** "The robot-sim replays control loop ticks at 1 Hz, calling Cosmos3-Edge each tick. The curator scores every episode — bad ones never leave the device."
+**Talk track:** "Robot-sim runs a 1 Hz control loop — each tick calls Cosmos3-Edge, records the action plan. Curator scores every episode on-device. Sync-agent batches curated episodes to the hub. Rejects never leave."
 
-### 2.2 Watch the Pipeline
+### 2.2 Watch the On-Device Pipeline
 
 Split terminal view:
 ```bash
-# Terminal 1: curator decisions
-ssh root@thor "KUBECONFIG=/var/lib/microshift/resources/kubeadmin/kubeconfig oc logs -f deployment/curator -n flywheel"
+# Terminal 1: curator decisions scrolling (PASS / REJECT visible)
+ssh thor "KUBECONFIG=/var/lib/microshift/resources/kubeadmin/kubeconfig \
+  oc logs -f deployment/curator -n flywheel"
 
-# Terminal 2: sync-agent uploads
-ssh root@thor "KUBECONFIG=/var/lib/microshift/resources/kubeadmin/kubeconfig oc logs -f deployment/sync-agent -n flywheel"
+# Terminal 2: sync-agent uploads + Kafka publish
+ssh thor "KUBECONFIG=/var/lib/microshift/resources/kubeadmin/kubeconfig \
+  oc logs -f deployment/sync-agent -n flywheel"
 ```
 
 Show:
-- Curator PASS/REJECT decisions scrolling (planted rejects visible)
-- Sync-agent uploading to MinIO, publishing to Kafka
-- MinIO console: episodes appearing in `episodes-curated` bucket
-- Kafka topic: manifests arriving
+- Curator PASS/REJECT decisions (planted 30% failure rate)
+- Sync-agent: `[sync-agent] Uploaded <id> -> episodes-curated/<id>.json, manifest -> episode-manifests`
+- MinIO console: curated bucket filling up
+- Hub Kafka: `episode-manifests` consumer offset advancing (via Argo CD or `oc exec`)
 
 ### 2.3 Prove the Gate
 
 ```bash
-# Show rejected episodes stayed on device
-ssh root@thor "ls /var/lib/episodes/rejected/"
+# Rejected episodes on device — never uploaded
+ssh thor "ls /var/lib/episodes/rejected/ | wc -l"
 
-# Show only clean episodes reached MinIO
-ssh root@thor "ls /var/lib/episodes/sent/"
+# Only clean episodes in MinIO
+ssh thor "ls /var/lib/episodes/sent/ | wc -l"
 ```
 
-**Talk track:** "The 30% failure-injected episodes were caught by the on-device curator and never left. Only quality data reaches the hub. This is bandwidth savings and data hygiene at the edge."
+**Talk track:** "Two different counts. The rejected ones stayed on the device. That's on-device intelligence as a data flywheel gate."
 
-### 2.4 Stop the Flywheel
+### 2.4 Hub Manifest Consumer Hits Threshold
 
+Watch the hub-side consumer in vla-training:
 ```bash
-ssh root@thor "KUBECONFIG=/var/lib/microshift/resources/kubeadmin/kubeconfig oc scale deployment robot-sim curator -n flywheel --replicas=0"
+oc logs -f deployment/manifest-consumer -n vla-training
 ```
 
----
-
-## Act 3 — Trust and Observability (~4 min)
-
-**Story:** Everything is signed, verified, and observable.
-
-### 3.1 Trust Plane
-
-Show RHTAS:
-- Rekor search UI: `rekor-search-ui-trusted-artifact-signer.apps.<cluster>`
-- Show the Rekor transparency log entry for the signed bootc image
-
-Show device policy (both files are required — D018/D019):
-```bash
-ssh root@thor "cat /etc/containers/policy.json"
-# sigstoreSigned rule for internal-registry — declares WHAT to require
-ssh root@thor "cat /etc/containers/registries.d/internal-registry.yaml"
-# use-sigstore-attachments: true — tells containers/image WHERE to find the signature
-# Both CRI-O (workload pulls) and bootc (OS image pulls) enforce this identically
+Expected output (after 10 curated episodes):
+```
+[consumer] Received episode abc123 (score=1.0) [8/10]
+[consumer] Received episode def456 (score=1.0) [9/10]
+[consumer] Received episode ghi789 (score=1.0) [10/10]
+[consumer] TRIGGER #1: threshold reached (10 curated episodes) -- initiating training pipeline
+[consumer] Published training-trigger event -> training-triggers
+[consumer] DSP run created: <run_id>
 ```
 
-### 3.2 Telemetry
+### 2.5 GPU Scales from Zero (requires L40S machinepool)
 
-Show OTel data flowing:
-- Tempo UI: traces from robot-sim → Cosmos3-Edge inference
-- Host metrics: CPU, memory, GPU utilization
-- Journald logs: MicroShift, CRI-O events
-
-**Talk track:** "The OTel collector runs as a systemd service — not a Kubernetes workload. It has host-level access to everything: journald, GPU telemetry, host metrics. When the device is disconnected, telemetry spools to NVMe and drains when connectivity returns."
-
-### 3.3 Disconnect Tolerance (Optional)
+Switch to the DSP UI (vla-training):
+- Show the `cosmos3-edge-finetune` pipeline run in "Running" state
+- The `finetune-cosmos3` step is pending Kueue admission → GPU node is 0
 
 ```bash
-# Pull the uplink
-ssh root@thor "ip link set enP2p1s0 down"
-# Run flywheel briefly — telemetry spools
-# Restore
-ssh root@thor "ip link set enP2p1s0 up"
-# Watch telemetry backfill in Tempo
+# Watch nodes scale (takes ~3-4 min for EC2 instance to join)
+watch oc get nodes -l nvidia.com/gpu=true
+# Watch Kueue admit the workload
+oc get workloads -n vla-training
+```
+
+**Talk track:** "No GPU nodes exist right now. Kueue is holding the finetune pod. The cluster autoscaler sees the pending workload and spins up an L40S node. Cost is zero until inference is needed."
+
+Show the node appear: `STATUS: Ready, INSTANCE: g6.xlarge`
+
+The remaining pipeline steps (eval, package, sign, PR) run automatically.
+
+### 2.6 Stop the Flywheel
+
+```bash
+ssh thor "KUBECONFIG=/var/lib/microshift/resources/kubeadmin/kubeconfig \
+  oc scale deployment robot-sim curator sync-agent -n flywheel --replicas=0"
 ```
 
 ---
 
-## Stinger — GitOps in Action (~2 min)
+## Act 3 — Model Promotion (~4 min)
 
-**Story:** A git commit changes the device. No SSH, no manual intervention.
+**Story:** The pipeline produces a better checkpoint, packages it, signs it, and opens a PR. Merge → the device upgrades without a reboot.
+
+> [!NOTE]
+> For time-compressed demos: pipeline's `max_steps=50` produces a quick run. The PR shown contains
+> real Gate 1 artifacts. Have the "real pre-completed" eval report pre-baked as a fallback if the
+> live run hasn't finished — never show fake output, just compressed time.
+
+### 3.1 Show the Promotion PR
+
+After the KFP pipeline completes, a PR is automatically opened against this repo:
+
+- PR title: `[promote] cosmos3-edge v2`
+- PR body: Gate 1 eval table (loss, val pass-rate), modelcar digest by-digest
+- Files changed: `gitops/vllm-cosmos3/deployment-green.yaml` (updated modelcar digest + MODEL_VERSION=v2)
 
 ```bash
-# From your laptop — change a workload parameter
+# From your laptop:
+gh pr list --repo jeremyary/thor-testing
+```
+
+**Talk track:** "The pipeline did this. No human assembled the PR. The eval artifacts are real. Gate 3 is ours — we review and merge."
+
+### 3.2 Merge and Watch Argo Sync
+
+Merge the PR from the GitHub UI (or `gh pr merge --squash`).
+
+```bash
+# Watch Argo pick it up
+oc get application vllm-cosmos3-thor -n openshift-gitops -w
+```
+
+Argo syncs `deployment-green.yaml`. On the device:
+```bash
+ssh thor "KUBECONFIG=/var/lib/microshift/resources/kubeadmin/kubeconfig \
+  oc get pods -n vllm -w"
+```
+
+The green initContainer pulls the new modelcar:
+- CRI-O enforces `sigstoreSigned` policy — signature verified before pull
+- Modelcar copy to `/root/.cache/huggingface` completes
+- vLLM-Omni starts with the new checkpoint
+
+### 3.3 The Selector Flips
+
+The same PR set `deployment.yaml` replicas=0 (blue goes dark) and `service.yaml` selector=green. Confirm:
+```bash
+oc get svc cosmos3-edge -n vllm -o jsonpath='{.spec.selector}'
+# -> {"app":"cosmos3-edge","color":"green"}
+
+# Port 30800 now routes to v2
+curl http://10.0.0.42:30800/v1/models
+```
+
+### 3.4 Before/After in Perses
+
+Open the Perses dashboard — "Model Version Promotion" section:
+- **v1 panel** (left): existing control-tick traces, MODEL_VERSION=cosmos3-edge-v1
+- **v2 panel** (right): new traces starting now, MODEL_VERSION=cosmos3-edge-v2
+
+Re-run the Act 1 inference request and compare response quality.
+
+**Talk track:** "Same prompt. Different model. The difference is what the flywheel trained on — data generated by THIS device, curated by THIS model, promoted through THIS pipeline. It's self-improving."
+
+---
+
+## Stinger — Trust and Rollback (~2 min)
+
+**Story:** The policy is real. Try to push an unsigned model — it gets refused. Git revert walks it back.
+
+### Unsigned model refused
+
+```bash
+# Pull a model tag without signing it, try to force it onto the device
+# (update deployment-green.yaml to an unsigned image digest)
+# Argo syncs → CRI-O tries to pull → FAILS with:
+#   "SignatureMissing: A signature was required, but no signature exists"
+ssh thor "KUBECONFIG=/var/lib/microshift/resources/kubeadmin/kubeconfig \
+  oc describe pod -n vllm -l color=green | grep -A5 Events"
+```
+
+### Git revert rolls the model back — no reboot
+
+```bash
 cd ~/redhat/git/thor-testing
-# Edit gitops/edge-workloads/smoke-test.yaml — change a value
-git commit -am "Live demo: GitOps workload update"
+git revert HEAD --no-edit
 git push
 ```
 
-Watch Argo sync → show the change on Thor:
+Argo syncs → green goes back to the previous (signed, valid) modelcar → pod recovers → selector stays green → service restored. **No bootc switch, no reboot.**
+
+---
+
+## Disconnect Tolerance (Bonus — ~1 min)
+
 ```bash
-ssh root@thor "KUBECONFIG=/var/lib/microshift/resources/kubeadmin/kubeconfig oc get configmap edge-smoke-test -n edge-demo -o jsonpath='{.data}'"
+# Pull Thor's uplink mid-run
+ssh thor "ip link set enP2p1s0 down"
+# Flywheel runs briefly — OTel collector spools to NVMe
+# Restore
+ssh thor "ip link set enP2p1s0 up"
+# Watch telemetry backfill in Tempo/Perses — traces appear with past timestamps
 ```
 
-**Talk track:** "Git push to GitHub, Argo picks it up, syncs through ACM's cluster-proxy to Thor. Zero inbound connections. That's how you manage a fleet of robot brains."
+---
+
+## Failure Recovery
+
+| Problem | Fix |
+|---------|-----|
+| Cosmos3-Edge not responding | `ssh thor "KUBECONFIG=... oc delete pod -n vllm -l app=cosmos3-edge"` — wait 5 min |
+| GPU compute failure (error 100) | `ssh thor "systemctl restart nvidia-gpu-reset"` |
+| MicroShift not starting | `ssh thor "systemctl restart microshift"` — wait 2 min |
+| Thor unreachable | Power cycle, wait 3 min for boot + GPU reset + MicroShift |
+| Argo not syncing | `oc annotate application <app> -n openshift-gitops argocd.argoproj.io/refresh=hard` |
+| Flywheel won't stop | `ssh thor "KUBECONFIG=... oc scale deployment robot-sim curator sync-agent -n flywheel --replicas=0"` |
+| MirrorMaker2 not running | `ssh thor "KUBECONFIG=... oc scale deployment mirrormaker2 -n flywheel --replicas=1"` |
+| DSP run won't start | Check `oc logs deployment/manifest-consumer -n vla-training` — TRAINING_PIPELINE_ID must be set |
+| No GPU node appears | L40S machinepool must exist + autoscaler enabled; confirm with `oc get machinesets` |
+| Blue/green: wrong side active | `oc get svc cosmos3-edge -n vllm -o jsonpath='{.spec.selector}'` — flip via git commit if wrong |
+| Stale UnexpectedAdmissionError pods | `oc delete pod -n vllm --field-selector status.phase!=Running` |
+| Catastrophic failure | Switch to pre-recorded video |
 
 ---
 

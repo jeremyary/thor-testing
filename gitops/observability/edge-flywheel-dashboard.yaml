@@ -4,15 +4,25 @@
 #
 # Data sources (all flow through the device-side OTel collector → hub Tempo):
 #
-# Traces:
+# Traces (properly nested — robot-sim sets start_as_current_span for nesting):
 #   - robot-sim "episode" root spans (service.name=robot-sim)
 #     Attributes: episode.id, episode.scene, episode.ticks,
-#                 episode.avg_latency_ms, episode.has_failure
-#   - robot-sim "inference" child spans
-#     Attributes: inference.latency_ms, inference.model, inference.error
+#                 episode.avg_latency_ms, episode.all_within_budget, episode.has_failure
+#   - robot-sim "control-tick" child spans (one per 200ms tick)
+#     Attributes: tick.number, tick.budget_ms, tick.elapsed_ms, tick.within_budget
+#   - robot-sim "inference" grandchild spans
+#     Attributes: inference.latency_ms, inference.status, inference.error
+#     NOTE: W3C traceparent is injected into the vLLM HTTP call so vLLM-Omni's
+#     own OTLP spans nest as children of the inference span in Tempo.
 #
 # Resource attributes stamped by the OTel collector on ALL signals:
-#   device.id=thor, device.type=jetson-agx-thor, model.version=cosmos3-edge-v1
+#   device.id=thor, device.type=jetson-agx-thor, model.version=<envvar from Deployment>
+#
+# model.version step-change: the last two panels show control-tick latency filtered
+# to cosmos3-edge-v1 and cosmos3-edge-v2 respectively. After a promotion (blue→green
+# flip), v2 traces appear; the delta between the two panels is the "dream before
+# deploy" payoff — the promoted model should show lower avg latency and higher
+# within-budget rate. demo Act 3 beat: open both panels side-by-side in Perses.
 #
 # Metrics (Prometheus scrape of vLLM /metrics + hostmetrics receiver):
 #   - vLLM request metrics (vllm_request_*, vllm_generation_*)
@@ -71,6 +81,23 @@ spec:
               height: 8
               width: 24
               x: 0
+              "y": 0
+      - kind: Grid
+        spec:
+          display:
+            title: "Model Version Promotion (step-change)"
+          items:
+            - content:
+                $ref: "#/spec/panels/tickLatencyV1"
+              height: 8
+              width: 12
+              x: 0
+              "y": 0
+            - content:
+                $ref: "#/spec/panels/tickLatencyV2"
+              height: 8
+              width: 12
+              x: 12
               "y": 0
     panels:
       episodeTraces:
@@ -143,6 +170,49 @@ spec:
                     datasource:
                       kind: TempoDatasource
                     query: '{resource.service.name="robot-sim" && name="episode" && span.episode.has_failure=true}'
+      tickLatencyV1:
+        kind: Panel
+        spec:
+          display:
+            name: "Control-Tick Latency — v1 (Before Promotion)"
+            description: >
+              Traces for control-tick spans where resource.model.version=cosmos3-edge-v1.
+              Each row is one 200ms tick; tick.elapsed_ms shows actual latency vs the
+              200ms budget. After promotion this panel goes quiet as v2 takes over.
+          plugin:
+            kind: Table
+            spec: {}
+          queries:
+            - kind: TraceQuery
+              spec:
+                plugin:
+                  kind: TempoTraceQuery
+                  spec:
+                    datasource:
+                      kind: TempoDatasource
+                    query: '{resource.service.name="robot-sim" && name="control-tick" && resource.model.version="cosmos3-edge-v1"}'
+      tickLatencyV2:
+        kind: Panel
+        spec:
+          display:
+            name: "Control-Tick Latency — v2 (After Promotion)"
+            description: >
+              Traces for control-tick spans where resource.model.version=cosmos3-edge-v2.
+              Populated only after the blue→green promotion flip lands (deployment-green.yaml
+              sets MODEL_VERSION=cosmos3-edge-v2). Compare avg duration with the v1 panel
+              to show the trained model's throughput improvement.
+          plugin:
+            kind: Table
+            spec: {}
+          queries:
+            - kind: TraceQuery
+              spec:
+                plugin:
+                  kind: TempoTraceQuery
+                  spec:
+                    datasource:
+                      kind: TempoDatasource
+                    query: '{resource.service.name="robot-sim" && name="control-tick" && resource.model.version="cosmos3-edge-v2"}'
   instanceSelector:
     matchLabels:
       app.kubernetes.io/name: edge-perses

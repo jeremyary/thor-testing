@@ -1,0 +1,105 @@
+# This project was developed with assistance from AI tools.
+#
+# GREEN side of the blue/green vLLM-Omni pair.
+#
+# Promotion workflow (Act 3 demo):
+#   1. Training pipeline finishes → packages new checkpoint as a signed modelcar
+#      OCI artifact → opens a PR against this repo.
+#   2. PR updates THREE things in this file:
+#        - initContainers[0].image: updated to the new modelcar digest
+#   3. PR also updates deployment.yaml: replicas: 1 → 0  (blue goes dark)
+#   4. PR also updates service.yaml: selector color: blue → green
+#   5. Merge → Argo syncs → green pod comes up → initContainer pulls & verifies
+#      new modelcar (cosign sigstoreSigned policy enforced by CRI-O) → vLLM-Omni
+#      serves new checkpoint → Service selector flips → traffic on NodePort 30800
+#      now goes to the new model. No reboot.
+#
+# After a successful flip, blue can be archived by leaving replicas=0 as the
+# rollback target. Re-flip to blue by reversing the selector and replicas.
+#
+# NOTE: Only one side can have replicas=1 at a time — Thor has exactly one GPU.
+# The Recreate strategy + revisionHistoryLimit=0 match deployment.yaml (blue).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cosmos3-edge-green
+  namespace: vllm
+spec:
+  replicas: 0
+  strategy:
+    type: Recreate
+  revisionHistoryLimit: 0
+  selector:
+    matchLabels:
+      app: cosmos3-edge
+      color: green
+  template:
+    metadata:
+      labels:
+        app: cosmos3-edge
+        color: green
+    spec:
+      imagePullSecrets:
+        - name: thor-registry-pull
+      # PROMOTION: update this image digest to the new signed modelcar produced
+      # by the training pipeline (tekton/05-modelcar-pipeline.yaml or Phase 4
+      # KFP pipeline). The cosign sigstoreSigned policy in policy.json and
+      # registries.d will enforce signature verification at pull time.
+      # Initially set to the same baseline modelcar as blue so this deployment
+      # is valid/deployable from the start even before a real promotion.
+      initContainers:
+        - name: fetch-model
+          image: default-route-openshift-image-registry.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com/thor-builds/cosmos3-edge-modelcar@sha256:5c990c93553514cea831fff2c040a879820a55012631648cd2fcdb05943a99ea
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c", "cp -a /models/huggingface/. /hf-cache/"]
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /hf-cache
+      containers:
+        - name: cosmos3
+          image: docker.io/vllm/vllm-omni:cosmos3
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "/scripts/entrypoint.sh"]
+          ports:
+            - containerPort: 8000
+          env:
+            - name: LD_LIBRARY_PATH
+              value: /usr/lib64/nvidia:/usr/lib64:/usr/local/cuda/lib64
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: compute,utility
+            - name: VLLM_ENABLE_V1_MULTIPROCESSING
+              value: "0"
+            - name: CUDA_VISIBLE_DEVICES
+              value: "0"
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            # MODEL_VERSION is read by robot-sim / OTel to stamp the model on
+            # all traces. Update this alongside the modelcar digest when promoting.
+            - name: MODEL_VERSION
+              value: "cosmos3-edge-v2"
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: nvidia-libs
+              mountPath: /usr/lib64/nvidia
+              readOnly: true
+            - name: hf-cache
+              mountPath: /root/.cache/huggingface
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+      volumes:
+        - name: nvidia-libs
+          hostPath:
+            path: /usr/lib64/nvidia
+        - name: hf-cache
+          emptyDir: {}
+        - name: scripts
+          configMap:
+            name: cosmos3-script
+            defaultMode: 0755

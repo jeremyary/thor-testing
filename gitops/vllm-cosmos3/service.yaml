@@ -6,8 +6,12 @@ metadata:
   namespace: vllm
 spec:
   type: NodePort
+  # color selector enables blue/green promotion: change color: blue -> green
+  # (and update the corresponding Deployment replicas) to flip traffic to a
+  # newly-promoted model checkpoint without a reboot. See deployment-green.yaml.
   selector:
     app: cosmos3-edge
+    color: blue
   ports:
     - port: 8000
       targetPort: 8000

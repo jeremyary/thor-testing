@@ -10,13 +10,22 @@ spec:
   # can never schedule alongside the outgoing one (Insufficient nvidia.com/gpu).
   strategy:
     type: Recreate
+  # revisionHistoryLimit=0: discard old ReplicaSets immediately after each
+  # rollout. Repeated reboots + Recreate strategy left stale pods accumulating
+  # across sessions in Init:ContainerStatusUnknown / UnexpectedAdmissionError
+  # because old ReplicaSets (default limit=10) were kept. 0 prunes them on
+  # every successful rollout. Run `kubectl delete pod -n vllm --field-selector
+  # status.phase!=Running` before a demo to clear any already-lingering ones.
+  revisionHistoryLimit: 0
   selector:
     matchLabels:
       app: cosmos3-edge
+      color: blue
   template:
     metadata:
       labels:
         app: cosmos3-edge
+        color: blue
     spec:
       # Thor's CRI-O has no credentials configured for the hub's internal
       # registry at the node level (/etc/crio/openshift-pull-secret only

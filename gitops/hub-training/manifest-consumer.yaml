@@ -1,0 +1,242 @@
+# This project was developed with assistance from AI tools.
+#
+# Hub-side episode manifest consumer — Phase 3 gap closure.
+#
+# Watches the hub fleet Kafka's `episode-manifests` topic (populated by
+# MirrorMaker2 replicating from the edge device's local Kafka).  Counts
+# curated episodes; when the threshold is reached, triggers a Data Science
+# Pipelines (DSP/KFP) training run in this same namespace and publishes a
+# `training-triggers` event so downstream consumers (Perses, Argo) can react.
+#
+# Prerequisite: fleet-kafka-ca Secret must exist in vla-training namespace.
+# Created by DEPLOYMENT_GUIDE.md § hub-training setup (oc get secret
+# fleet-cluster-ca-cert -n fleet-ops ... | oc apply -f - in vla-training).
+#
+# Uses the `pipeline` ServiceAccount (already has DSP access in vla-training
+# via console-dspa-access RoleBinding) so no additional RBAC is needed.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: manifest-consumer-code
+  namespace: vla-training
+data:
+  consumer.py: |
+    """Hub-side episode manifest consumer.
+
+    Consumes episode-manifests from the hub fleet Kafka (TLS), counts curated
+    episodes toward a training trigger threshold, then:
+      1. Calls the DSP REST API to create a training pipeline run.
+      2. Publishes a training-triggers event to hub Kafka for observability.
+
+    DSP pipeline: the run is only created when the TRAINING_PIPELINE_ID env var
+    is set (populated after the Phase 4 training pipeline is registered).
+    Until then the trigger is logged but not submitted, so Phase 3 acceptance
+    (consumer counts and logs trigger) is met independently of Phase 4.
+    """
+    import json, os, ssl, time, logging, urllib.request, urllib.error
+    from datetime import datetime, timezone
+
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s [consumer] %(levelname)s %(message)s")
+    log = logging.getLogger("manifest-consumer")
+
+    KAFKA_BOOTSTRAP   = os.environ.get("KAFKA_BOOTSTRAP",    "fleet-kafka-bootstrap.fleet-ops.svc:9093")
+    KAFKA_CA_FILE     = os.environ.get("KAFKA_CA_FILE",      "/certs/ca.crt")
+    EPISODE_TOPIC     = os.environ.get("EPISODE_TOPIC",      "episode-manifests")
+    TRIGGER_TOPIC     = os.environ.get("TRIGGER_TOPIC",      "training-triggers")
+    TRIGGER_THRESHOLD = int(os.environ.get("TRIGGER_THRESHOLD", "10"))
+    CONSUMER_GROUP    = os.environ.get("CONSUMER_GROUP",     "hub-manifest-consumer")
+    DSP_URL           = os.environ.get("DSP_URL",            "https://ds-pipeline-dspa.vla-training.svc:8443")
+    # Set this once the Phase 4 training pipeline is registered in DSP.
+    TRAINING_PIPELINE_ID = os.environ.get("TRAINING_PIPELINE_ID", "")
+    # SA token auto-mounted at this path in every pod.
+    SA_TOKEN_FILE     = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+    def get_sa_token() -> str:
+        with open(SA_TOKEN_FILE) as f:
+            return f.read().strip()
+
+    def call_dsp_api(episode_count: int, manifests: list) -> bool:
+        """POST a training run to the DSP KFP v2 API.
+        Returns True on success, False if pipeline not registered or call fails.
+        """
+        if not TRAINING_PIPELINE_ID:
+            log.info("TRAINING_PIPELINE_ID not set — trigger logged but DSP run not submitted "
+                     "(populate once Phase 4 pipeline is registered)")
+            return False
+
+        token = get_sa_token()
+        payload = {
+            "display_name": f"cosmos3-finetune-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}",
+            "pipeline_version_reference": {"pipeline_id": TRAINING_PIPELINE_ID},
+            "runtime_config": {
+                "parameters": {
+                    "episode_count": str(episode_count),
+                    "trigger_timestamp": datetime.now(timezone.utc).isoformat(),
+                    "episode_ids": json.dumps([m.get("episode_id") for m in manifests]),
+                }
+            },
+        }
+        body = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            f"{DSP_URL}/apis/v2beta1/runs",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type":  "application/json",
+            },
+            method="POST",
+        )
+        # DSP service uses a self-signed cert inside the cluster; skip verify.
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode    = ssl.CERT_NONE
+        try:
+            with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+                result = json.loads(resp.read())
+                log.info(f"DSP run created: {result.get('run_id', result)}")
+                return True
+        except urllib.error.HTTPError as e:
+            log.error(f"DSP API error {e.code}: {e.read().decode()[:200]}")
+        except Exception as e:
+            log.error(f"DSP API call failed: {e}")
+        return False
+
+    def publish_trigger(producer, manifests: list) -> None:
+        event = {
+            "event":     "training-trigger",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "episode_count": len(manifests),
+            "episode_ids":   [m.get("episode_id") for m in manifests],
+        }
+        try:
+            producer.send(TRIGGER_TOPIC, value=json.dumps(event).encode())
+            producer.flush()
+            log.info(f"Published training-trigger event → {TRIGGER_TOPIC}")
+        except Exception as e:
+            log.warning(f"Failed to publish trigger event: {e}")
+
+    def build_ssl_context() -> ssl.SSLContext:
+        ctx = ssl.create_default_context(cafile=KAFKA_CA_FILE)
+        return ctx
+
+    def run() -> None:
+        from kafka import KafkaConsumer, KafkaProducer
+
+        ssl_ctx = build_ssl_context()
+        log.info(f"Connecting to Kafka at {KAFKA_BOOTSTRAP}, topic={EPISODE_TOPIC}, "
+                 f"threshold={TRIGGER_THRESHOLD}")
+
+        consumer = KafkaConsumer(
+            EPISODE_TOPIC,
+            bootstrap_servers   = KAFKA_BOOTSTRAP,
+            security_protocol   = "SSL",
+            ssl_context         = ssl_ctx,
+            group_id            = CONSUMER_GROUP,
+            auto_offset_reset   = "earliest",
+            enable_auto_commit  = True,
+            value_deserializer  = lambda m: json.loads(m.decode("utf-8")),
+            consumer_timeout_ms = -1,   # block indefinitely
+        )
+        producer = KafkaProducer(
+            bootstrap_servers = KAFKA_BOOTSTRAP,
+            security_protocol = "SSL",
+            ssl_context       = ssl_ctx,
+        )
+
+        pending    = []
+        run_number = 0
+
+        log.info("Consumer ready — waiting for episode manifests")
+        for msg in consumer:
+            manifest = msg.value
+            episode_id = manifest.get("episode_id", "?")
+            score      = manifest.get("curation_score", "?")
+            log.info(f"Received episode {episode_id} (score={score}) "
+                     f"[{len(pending)+1}/{TRIGGER_THRESHOLD}]")
+            pending.append(manifest)
+
+            if len(pending) >= TRIGGER_THRESHOLD:
+                run_number += 1
+                log.info(
+                    f"TRIGGER #{run_number}: threshold reached "
+                    f"({len(pending)} curated episodes) — initiating training pipeline"
+                )
+                publish_trigger(producer, pending)
+                call_dsp_api(len(pending), pending)
+                pending = []   # reset for next batch
+
+    if __name__ == "__main__":
+        while True:
+            try:
+                run()
+            except Exception as e:
+                log.error(f"Consumer crashed: {e}. Restarting in 15s …")
+                time.sleep(15)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: manifest-consumer
+  namespace: vla-training
+  labels:
+    app: manifest-consumer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: manifest-consumer
+  template:
+    metadata:
+      labels:
+        app: manifest-consumer
+    spec:
+      serviceAccountName: pipeline
+      containers:
+        - name: consumer
+          image: docker.io/library/python:3.12-slim
+          command:
+            - sh
+            - -c
+            - pip install -q kafka-python-ng && python /app/consumer.py
+          env:
+            - name: KAFKA_BOOTSTRAP
+              value: "fleet-kafka-bootstrap.fleet-ops.svc:9093"
+            - name: KAFKA_CA_FILE
+              value: "/certs/ca.crt"
+            - name: EPISODE_TOPIC
+              value: "episode-manifests"
+            - name: TRIGGER_TOPIC
+              value: "training-triggers"
+            - name: TRIGGER_THRESHOLD
+              value: "10"
+            - name: CONSUMER_GROUP
+              value: "hub-manifest-consumer"
+            - name: DSP_URL
+              value: "https://ds-pipeline-dspa.vla-training.svc:8443"
+            # Populate once the Phase 4 training pipeline is registered in DSP.
+            # Until then, the consumer counts and logs but does not submit runs.
+            - name: TRAINING_PIPELINE_ID
+              value: ""
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          volumeMounts:
+            - name: code
+              mountPath: /app
+              readOnly: true
+            - name: fleet-kafka-ca
+              mountPath: /certs
+              readOnly: true
+      volumes:
+        - name: code
+          configMap:
+            name: manifest-consumer-code
+        - name: fleet-kafka-ca
+          secret:
+            secretName: fleet-kafka-ca
