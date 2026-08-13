@@ -127,7 +127,7 @@ Key learning: the gap between "BuildConfig works" and "Tekton pipeline works" fo
 - **Internal registry route:** `default-route-openshift-image-registry.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com`
 - **Image currently on Thor:** `sha256:c69b050b1e64920534fd348182a9105c8b2833c9177a5d270910c296a1fd101d` (2026-08-12 rebuild — D023's greenboot fix baked in from a clean Tekton build and verified end-to-end, cosign v2.6.5-signed, flightctl-agent 1.2.0, CRI-O `1.35.6-4...git41f610b`). Rollback target on the device is the previous image, `sha256:e3b8c951...` (D022).
 - **Flywheel workloads** are defaulted to replicas=0 in gitops manifests — scale up with `oc scale` or edit manifests for demos
-- **combined-registry-auth** Secret expires in ~30 days (token created 2026-08-10) — will need refresh
+- **combined-registry-auth** Secret refreshed 2026-08-12 (APPENG-6007) — new 30-day token, expires 2026-09-11, will need another refresh before then
 - **Demo runbook** exists at DEMO_RUNBOOK.md — 15-minute three-act demo structure with pre-flight checklist
 
 ## Related Docs
