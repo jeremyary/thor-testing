@@ -61,13 +61,23 @@ data:
     S3_ACCESS_KEY  = os.environ.get("S3_ACCESS_KEY")
     S3_SECRET_KEY  = os.environ.get("S3_SECRET_KEY")
     MODEL_VERSION  = os.environ.get("MODEL_VERSION",  "cosmos3-edge-v1")
-    # Number of denoising steps: fewer = faster, lower quality.
-    # 20 steps gives a watchable rollout in ~2.5s on T5000 MAXN.
     DIFFUSION_STEPS = int(os.environ.get("DIFFUSION_STEPS", "20"))
-    # Action chunk window: how many timesteps to send. 16 = canonical single chunk.
-    ACTION_CHUNK_SIZE = int(os.environ.get("ACTION_CHUNK_SIZE", "16"))
-    POLL_INTERVAL_S   = float(os.environ.get("POLL_INTERVAL_S", "1.0"))
-    JOB_TIMEOUT_S     = float(os.environ.get("JOB_TIMEOUT_S",  "120.0"))
+
+    # Auto-detect model name (same pattern as robot-sim)
+    _VLLM_MODEL = None
+    def _resolve_model():
+        global _VLLM_MODEL
+        if _VLLM_MODEL:
+            return _VLLM_MODEL
+        try:
+            with urllib.request.urlopen(f"{VLLM_URL}/v1/models", timeout=10) as resp:
+                data = json.loads(resp.read())
+                _VLLM_MODEL = data["data"][0]["id"]
+                print(f"[dreamer] Resolved model: {_VLLM_MODEL[:60]}...", flush=True)
+                return _VLLM_MODEL
+        except Exception as e:
+            print(f"[dreamer] Model resolve failed: {e}", flush=True)
+        return "nvidia/Cosmos3-Edge"
 
     def s3_client():
         import boto3
@@ -78,137 +88,99 @@ data:
             aws_secret_access_key= S3_SECRET_KEY,
         )
 
-    def write_action_file(action_chunk: list, domain_name: str, tmp_dir: str) -> str:
-        """Write action chunk to a temp JSON file in vLLM-Omni's expected format."""
-        # vLLM-Omni forward_dynamics expects action as a flat 2D array
-        # shaped [T, D] where T=timesteps, D=action dimensions
-        chunk = action_chunk[:ACTION_CHUNK_SIZE]  # trim if longer
-        action_data = {
-            "domain_name":      domain_name,
-            "action_chunk_size": len(chunk),
-            "actions":          chunk,
-        }
-        path = pathlib.Path(tmp_dir) / "action_chunk.json"
-        path.write_text(json.dumps(action_data))
-        return str(path)
-
     def call_forward_dynamics(frame_path: pathlib.Path,
                               action_chunk: list,
                               domain_name: str) -> bytes | None:
-        """Call Cosmos3-Edge Forward Dynamics and return MP4 bytes.
+        """Call Cosmos3-Edge Forward Dynamics via /v1/videos/sync.
 
-        vLLM-Omni Forward Dynamics API (from Cosmos3 docs):
-          POST /v1/videos  (multipart form)
-            action_mode=forward_dynamics
-            domain_name=<domain>
-            num_frames=<ACTION_CHUNK_SIZE+1>  (rollout frames = chunk + 1 initial)
-            fps=5
-            num_inference_steps=<DIFFUSION_STEPS>
-            input_reference=<conditioning_frame_file>
-            extra_params={"action_path":"<path>","use_resolution_template":false,...}
-          -> JSON with id field (async job)
-          GET /v1/videos/<id> -> {status: pending|processing|completed|failed}
-          GET /v1/videos/<id>/content -> MP4 bytes
+        Uses the synchronous endpoint which returns MP4 bytes directly --
+        no polling needed. Action chunk is passed inline in extra_params
+        (not via action_path file reference).
         """
         if not frame_path.exists():
             print(f"[dreamer] Frame not found: {frame_path}", flush=True)
             return None
 
-        with tempfile.TemporaryDirectory() as tmp:
-            action_file = write_action_file(action_chunk, domain_name, tmp)
-            num_frames  = len(action_chunk[:ACTION_CHUNK_SIZE]) + 1
+        model_name = _resolve_model()
+        chunk = action_chunk[:16]
+        num_frames = len(chunk) + 1
+        dims = len(chunk[0]) if chunk else 10
 
-            # Build multipart request via urllib
-            boundary = "----DreamerBoundary7890"
-            def part(name, value, filename=None, content_type="text/plain"):
-                disp = f'Content-Disposition: form-data; name="{name}"'
-                if filename:
-                    disp += f'; filename="{filename}"'
-                ct = f"\r\nContent-Type: {content_type}" if content_type != "text/plain" else ""
-                return (f"--{boundary}\r\n{disp}{ct}\r\n\r\n"
-                        f"{value}\r\n").encode()
+        boundary = "----DreamerBoundary" + str(int(time.time()))
 
-            frame_bytes = frame_path.read_bytes()
+        def text_part(name, value):
+            return (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                f"{value}\r\n"
+            ).encode()
 
-            body_parts = [
-                part("action_mode",          "forward_dynamics"),
-                part("num_frames",           str(num_frames)),
-                part("fps",                  "5"),
-                part("num_inference_steps",  str(DIFFUSION_STEPS)),
-                part("guidance_scale",       "1.0"),
-                part("extra_params", json.dumps({
-                    "action_path":              action_file,
-                    "domain_name":              domain_name,
-                    "use_resolution_template":  False,
-                    "use_duration_template":    False,
-                    "guardrails":               False,
-                })),
-                # Conditioning frame
-                (f"--{boundary}\r\n"
-                 f'Content-Disposition: form-data; name="input_reference"; filename="frame.jpg"\r\n'
-                 f"Content-Type: image/jpeg\r\n\r\n").encode() + frame_bytes + b"\r\n",
-                f"--{boundary}--\r\n".encode(),
-            ]
-            body = b"".join(b if isinstance(b, bytes) else b.encode() for b in body_parts)
+        extra_params = json.dumps({
+            "action_mode": "forward_dynamics",
+            "domain_name": domain_name,
+            "raw_action_dim": dims,
+            "action_chunk_size": len(chunk),
+            "action": chunk,
+            "guardrails": False,
+            "use_resolution_template": False,
+            "use_duration_template": False,
+        })
 
-            req = urllib.request.Request(
-                f"{VLLM_URL}/v1/videos",
-                data=body,
-                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-                method="POST",
-            )
+        frame_bytes = frame_path.read_bytes()
+        file_part = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="input_reference"; '
+            f'filename="frame.jpg"\r\n'
+            f"Content-Type: image/jpeg\r\n\r\n"
+        ).encode() + frame_bytes + b"\r\n"
 
-            print(f"[dreamer] Submitting Forward Dynamics job "
-                  f"(domain={domain_name} frames={num_frames} steps={DIFFUSION_STEPS})",
+        parts = [
+            text_part("model", model_name),
+            text_part("prompt", "A robotic arm manipulating objects on a table"),
+            text_part("size", "320x192"),
+            text_part("num_frames", str(num_frames)),
+            text_part("fps", "5"),
+            text_part("num_inference_steps", str(DIFFUSION_STEPS)),
+            text_part("guidance_scale", "1.0"),
+            text_part("flow_shift", "3.0"),
+            text_part("seed", str(int(time.time()) % 999999)),
+            text_part("extra_params", extra_params),
+            file_part,
+            f"--{boundary}--\r\n".encode(),
+        ]
+        body = b"".join(parts)
+
+        req = urllib.request.Request(
+            f"{VLLM_URL}/v1/videos/sync",
+            data=body,
+            headers={
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "Accept": "video/mp4",
+            },
+        )
+
+        print(f"[dreamer] Forward Dynamics: domain={domain_name} "
+              f"frames={num_frames} steps={DIFFUSION_STEPS} "
+              f"chunk=[{len(chunk)},{dims}]", flush=True)
+        t0 = time.monotonic()
+        try:
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                mp4_bytes = resp.read()
+            elapsed = round(time.monotonic() - t0, 1)
+            print(f"[dreamer] Dream complete: {len(mp4_bytes)//1024}KB in {elapsed}s",
                   flush=True)
-            t0 = time.monotonic()
+            return mp4_bytes
+        except urllib.error.HTTPError as e:
+            err_body = ""
             try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    job = json.loads(resp.read())
-            except Exception as e:
-                print(f"[dreamer] Job submission failed: {e}", flush=True)
-                return None
-
-            job_id = job.get("id")
-            if not job_id:
-                print(f"[dreamer] No job id in response: {job}", flush=True)
-                return None
-
-            # Poll until complete
-            print(f"[dreamer] Polling job {job_id}...", flush=True)
-            deadline = time.monotonic() + JOB_TIMEOUT_S
-            while time.monotonic() < deadline:
-                try:
-                    with urllib.request.urlopen(
-                        f"{VLLM_URL}/v1/videos/{job_id}", timeout=10
-                    ) as resp:
-                        status = json.loads(resp.read())
-                    st = status.get("status", "")
-                    if st == "completed":
-                        elapsed = round(time.monotonic() - t0, 1)
-                        print(f"[dreamer] Job {job_id} completed in {elapsed}s", flush=True)
-                        break
-                    elif st == "failed":
-                        print(f"[dreamer] Job {job_id} failed: {status}", flush=True)
-                        return None
-                except Exception as e:
-                    print(f"[dreamer] Poll error: {e}", flush=True)
-                time.sleep(POLL_INTERVAL_S)
-            else:
-                print(f"[dreamer] Job {job_id} timed out after {JOB_TIMEOUT_S}s", flush=True)
-                return None
-
-            # Download MP4
-            try:
-                with urllib.request.urlopen(
-                    f"{VLLM_URL}/v1/videos/{job_id}/content", timeout=30
-                ) as resp:
-                    mp4_bytes = resp.read()
-                print(f"[dreamer] Downloaded rollout: {len(mp4_bytes)//1024}KB", flush=True)
-                return mp4_bytes
-            except Exception as e:
-                print(f"[dreamer] MP4 download failed: {e}", flush=True)
-                return None
+                err_body = e.read().decode()[:500]
+            except Exception:
+                pass
+            print(f"[dreamer] HTTP {e.code}: {err_body}", flush=True)
+            return None
+        except Exception as e:
+            print(f"[dreamer] Forward Dynamics failed: {e}", flush=True)
+            return None
 
     def upload_dream(s3, episode_id: str, model_version: str, mp4_bytes: bytes) -> str:
         key = f"dreams/{episode_id}-{model_version}.mp4"
