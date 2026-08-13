@@ -25,9 +25,18 @@ data:
     hub.default.api.timeout.ms=120000
     hub.metadata.max.age.ms=300000
 
-    # Replication: edge -> hub only
+    # Replication: edge -> hub only.
+    # All hub->edge sub-features must be explicitly disabled to prevent MM2
+    # from creating a reverse-direction herder that tries to coordinate on
+    # the hub Kafka (which fails because it can't create internal topics
+    # on the external TLS route).
     edge->hub.enabled=true
     hub->edge.enabled=false
+    hub->edge.emit.heartbeats.enabled=false
+    hub->edge.emit.checkpoints.enabled=false
+    hub->edge.sync.group.offsets.enabled=false
+    hub->edge.sync.topic.configs.enabled=false
+    hub->edge.sync.topic.acls.enabled=false
 
     # Topics to replicate
     edge->hub.topics=episode-manifests
