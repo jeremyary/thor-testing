@@ -647,8 +647,7 @@ def gate2_dream_comparison(
 # Component: package_modelcar
 # ---------------------------------------------------------------------------
 @dsl.component(
-    base_image="gcr.io/go-containerregistry/crane:latest",
-    install_kfp_package=False,
+    base_image="python:3.12-slim",
     packages_to_install=[],
 )
 def package_modelcar(
@@ -669,6 +668,15 @@ def package_modelcar(
     checkpoint_dir = pathlib.Path(checkpoint.path)
     out_dir        = pathlib.Path(image_ref_out.path)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Install crane (go-containerregistry) -- the gcr.io/go-containerregistry/crane
+    # image has no shell so KFP can't use it as a base. Install the binary here.
+    import urllib.request, platform, stat
+    arch = "arm64" if platform.machine() == "aarch64" else "x86_64"
+    crane_url = f"https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_{arch}.tar.gz"
+    print(f"[package] installing crane from {crane_url}")
+    urllib.request.urlretrieve(crane_url, "/tmp/crane.tar.gz")
+    subprocess.run(["tar", "-xzf", "/tmp/crane.tar.gz", "-C", "/usr/local/bin", "crane"], check=True)
 
     image_ref = f"{registry}/{image_name}:{model_version}"
     print(f"[package] building modelcar -> {image_ref}")
@@ -711,8 +719,7 @@ def package_modelcar(
 # Component: sign
 # ---------------------------------------------------------------------------
 @dsl.component(
-    base_image="gcr.io/projectsigstore/cosign:v2.6.5",
-    install_kfp_package=False,
+    base_image="python:3.12-slim",
     packages_to_install=[],
 )
 def sign_modelcar(
@@ -727,6 +734,14 @@ def sign_modelcar(
     art_dir   = pathlib.Path(image_ref_artifact.path)
     meta      = json.loads((art_dir / "image_ref.json").read_text())
     image_ref = meta["image_ref"]
+
+    # Install cosign binary
+    import urllib.request, platform, stat
+    arch = "amd64" if platform.machine() == "x86_64" else "arm64"
+    cosign_url = f"https://github.com/sigstore/cosign/releases/download/v2.6.5/cosign-linux-{arch}"
+    print(f"[sign] installing cosign from {cosign_url}")
+    urllib.request.urlretrieve(cosign_url, "/usr/local/bin/cosign")
+    os.chmod("/usr/local/bin/cosign", 0o755)
 
     print(f"[sign] cosign sign {image_ref}")
     env = os.environ.copy()
@@ -747,8 +762,7 @@ def sign_modelcar(
 # Component: promote (open PR against GitOps repo)
 # ---------------------------------------------------------------------------
 @dsl.component(
-    base_image="bitnami/git:latest",
-    install_kfp_package=False,
+    base_image="python:3.12-slim",
     packages_to_install=["PyGithub==2.4.0"],
 )
 def open_promotion_pr(

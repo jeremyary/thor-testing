@@ -679,7 +679,9 @@ deploymentSpec:
         - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
           \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
           \ python3 -m pip install --quiet --no-warn-script-location 'PyGithub==2.4.0'\
-          \ && \"$0\" \"$@\"\n"
+          \  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.17.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
         - sh
         - -ec
         - 'program_path=$(mktemp -d)
@@ -756,7 +758,7 @@ deploymentSpec:
           \ {model_version}\",\n        body=pr_body,\n        head=branch_name,\n\
           \        base=\"main\",\n    )\n    print(f\"[promote] PR opened: {pr.html_url}\"\
           )\n    return pr.html_url\n\n"
-        image: bitnami/git:latest
+        image: python:3.12-slim
     exec-package-modelcar:
       container:
         args:
@@ -765,6 +767,13 @@ deploymentSpec:
         - --function_to_execute
         - package_modelcar
         command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.17.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
         - sh
         - -ec
         - 'program_path=$(mktemp -d)
@@ -785,10 +794,18 @@ deploymentSpec:
           \ layer is appended on top.\n    \"\"\"\n    import subprocess, pathlib,\
           \ json, os, tempfile\n\n    checkpoint_dir = pathlib.Path(checkpoint.path)\n\
           \    out_dir        = pathlib.Path(image_ref_out.path)\n    out_dir.mkdir(parents=True,\
-          \ exist_ok=True)\n\n    image_ref = f\"{registry}/{image_name}:{model_version}\"\
-          \n    print(f\"[package] building modelcar -> {image_ref}\")\n\n    # Create\
-          \ a tar of the checkpoint directory to append as a layer\n    with tempfile.NamedTemporaryFile(suffix=\"\
-          .tar\", delete=False) as tmp:\n        layer_tar = tmp.name\n\n    subprocess.run([\n\
+          \ exist_ok=True)\n\n    # Install crane (go-containerregistry) -- the gcr.io/go-containerregistry/crane\n\
+          \    # image has no shell so KFP can't use it as a base. Install the binary\
+          \ here.\n    import urllib.request, platform, stat\n    arch = \"arm64\"\
+          \ if platform.machine() == \"aarch64\" else \"x86_64\"\n    crane_url =\
+          \ f\"https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_{arch}.tar.gz\"\
+          \n    print(f\"[package] installing crane from {crane_url}\")\n    urllib.request.urlretrieve(crane_url,\
+          \ \"/tmp/crane.tar.gz\")\n    subprocess.run([\"tar\", \"-xzf\", \"/tmp/crane.tar.gz\"\
+          , \"-C\", \"/usr/local/bin\", \"crane\"], check=True)\n\n    image_ref =\
+          \ f\"{registry}/{image_name}:{model_version}\"\n    print(f\"[package] building\
+          \ modelcar -> {image_ref}\")\n\n    # Create a tar of the checkpoint directory\
+          \ to append as a layer\n    with tempfile.NamedTemporaryFile(suffix=\".tar\"\
+          , delete=False) as tmp:\n        layer_tar = tmp.name\n\n    subprocess.run([\n\
           \        \"tar\", \"-cf\", layer_tar,\n        \"-C\", str(checkpoint_dir.parent),\n\
           \        checkpoint_dir.name,\n    ], check=True)\n\n    # crane append:\
           \ base=ubi9-micro, one layer = checkpoint tar\n    subprocess.run([\n  \
@@ -802,7 +819,7 @@ deploymentSpec:
           )\n\n    meta = {\"image_ref\": image_ref_by_digest, \"tag\": image_ref,\
           \ \"digest\": digest}\n    (out_dir / \"image_ref.json\").write_text(json.dumps(meta))\n\
           \    return image_ref_by_digest\n\n"
-        image: gcr.io/go-containerregistry/crane:latest
+        image: python:3.12-slim
     exec-sign-modelcar:
       container:
         args:
@@ -811,6 +828,13 @@ deploymentSpec:
         - --function_to_execute
         - sign_modelcar
         command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.17.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
         - sh
         - -ec
         - 'program_path=$(mktemp -d)
@@ -829,14 +853,19 @@ deploymentSpec:
           \ static keypair + RHTAS\n    Rekor as the Tekton OS-image pipeline (D008/D022).\"\
           \"\"\n    import subprocess, pathlib, json, os\n\n    art_dir   = pathlib.Path(image_ref_artifact.path)\n\
           \    meta      = json.loads((art_dir / \"image_ref.json\").read_text())\n\
-          \    image_ref = meta[\"image_ref\"]\n\n    print(f\"[sign] cosign sign\
-          \ {image_ref}\")\n    env = os.environ.copy()\n    env[\"COSIGN_PASSWORD\"\
-          ] = \"\"  # key is unencrypted in the Secret (matches D008)\n    subprocess.run([\n\
-          \        \"cosign\", \"sign\",\n        \"--key\",        cosign_key_path,\n\
-          \        \"--rekor-url\",  rekor_url,\n        \"--tlog-upload=true\",\n\
-          \        \"-y\",\n        image_ref,\n    ], check=True, env=env)\n    print(f\"\
-          [sign] signed -> Rekor entry logged\")\n    return image_ref\n\n"
-        image: gcr.io/projectsigstore/cosign:v2.6.5
+          \    image_ref = meta[\"image_ref\"]\n\n    # Install cosign binary\n  \
+          \  import urllib.request, platform, stat\n    arch = \"amd64\" if platform.machine()\
+          \ == \"x86_64\" else \"arm64\"\n    cosign_url = f\"https://github.com/sigstore/cosign/releases/download/v2.6.5/cosign-linux-{arch}\"\
+          \n    print(f\"[sign] installing cosign from {cosign_url}\")\n    urllib.request.urlretrieve(cosign_url,\
+          \ \"/usr/local/bin/cosign\")\n    os.chmod(\"/usr/local/bin/cosign\", 0o755)\n\
+          \n    print(f\"[sign] cosign sign {image_ref}\")\n    env = os.environ.copy()\n\
+          \    env[\"COSIGN_PASSWORD\"] = \"\"  # key is unencrypted in the Secret\
+          \ (matches D008)\n    subprocess.run([\n        \"cosign\", \"sign\",\n\
+          \        \"--key\",        cosign_key_path,\n        \"--rekor-url\",  rekor_url,\n\
+          \        \"--tlog-upload=true\",\n        \"-y\",\n        image_ref,\n\
+          \    ], check=True, env=env)\n    print(f\"[sign] signed -> Rekor entry\
+          \ logged\")\n    return image_ref\n\n"
+        image: python:3.12-slim
 pipelineInfo:
   description: 'Phase 4 training pipeline: ingest curated episodes -> LoRA fine-tune
     Cosmos3-Edge -> Gate 1 eval -> package modelcar -> cosign sign -> open promotion
