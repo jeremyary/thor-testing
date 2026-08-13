@@ -19,6 +19,9 @@
 - [ ] Thor powered on, booted, MicroShift healthy (`oc get nodes` shows Ready on Thor's MicroShift)
 - [ ] Combined-registry-auth Secret not expired (`oc get secret combined-registry-auth -n thor-builds`)
 - [ ] Cosmos3-Edge model loaded and warm — `curl http://10.0.0.42:30800/v1/models` returns the model
+- [ ] BridgeData2 frames on Thor: `ssh thor "ls /var/lib/robot-sim/frames/"` (5 JPEGs)
+- [ ] Action pool on Thor: `ssh thor "ls /var/lib/robot-sim/action_pool.json"`
+- [ ] Dreamer at replicas=0 (only scale up in Act 3 after promotion)
 - [ ] Flywheel workloads at replicas=0 (no GPU coil whine yet)
 - [ ] **MirrorMaker2 running** — edge→hub episode replication is OFF by default (replicas=0). Scale it up:
   ```bash
@@ -84,20 +87,32 @@ systemctl status microshift flightctl-agent opentelemetry-collector nvidia-gpu-r
 
 **Talk track:** "The device runs a derived bootc image — our layer on top of the sidecar team's CentOS Stream 10 Thor image. MicroShift, flightctl-agent, OTel collector, GPU reset service — all baked in. OS updates are transactional with automatic rollback."
 
-### 1.3 Live Inference
+### 1.3 Live Inference — Embodied Reasoning Mode
+
+**Premise (state this explicitly):** Thor is a stationary edge inference node simulating a robot control loop. There is no physical arm. This is the stated and honest framing — the platform, model, and flywheel are all real; the robot is simulated.
 
 ```bash
-# Generator mode — predicted rollout video
-curl -X POST http://thor:30800/v1/chat/completions \
+# Embodied reasoning: image + instruction -> structured action plan
+# Uses the pick_place BridgeData2 frame as visual conditioning
+FRAME_B64=$(ssh thor "base64 -w0 /var/lib/robot-sim/frames/pick_place.jpg")
+
+curl -X POST http://10.0.0.42:30800/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "nvidia/Cosmos3-Edge",
-    "messages": [{"role": "user", "content": "A humanoid robot picks up a red box from a shelf and places it on a conveyor belt"}],
-    "max_tokens": 100
-  }'
+  -d "{
+    \"model\": \"nvidia/Cosmos3-Edge\",
+    \"messages\": [{
+      \"role\": \"user\",
+      \"content\": [
+        {\"type\": \"image_url\", \"image_url\": {\"url\": \"data:image/jpeg;base64,${FRAME_B64}\"}},
+        {\"type\": \"text\", \"text\": \"Scene: A robotic arm must pick up an object from a tray and place it in the target position.\n\nYou are a robot arm controller. Examine the scene and output structured JSON with keys: action_strategy, confidence (0.0-1.0), reasoning, select_action ('good' or 'bad').\"}
+      ]
+    }],
+    \"max_tokens\": 200,
+    \"temperature\": 0.6
+  }"
 ```
 
-**Talk track:** "This is Cosmos3-Edge — a 4B omni-modal world foundation model running on the Thor's Blackwell GPU. No camera — it shows you what it *believes* will happen. This is the model that the flywheel trains."
+**Talk track:** "This is Cosmos3-Edge's Reasoner — not a text chatbot, a world model. It's receiving a real image from NVIDIA's BridgeData2 robot dataset as visual context, the same images our flywheel uses. It reasons about the physical scene and selects an action strategy. That reasoning quality is what the flywheel improves."
 
 ### 1.4 Resilience Demo (Optional)
 
@@ -124,7 +139,7 @@ ssh thor "KUBECONFIG=/var/lib/microshift/resources/kubeadmin/kubeconfig \
   oc scale deployment robot-sim curator sync-agent -n flywheel --replicas=1"
 ```
 
-**Talk track:** "Robot-sim runs a 1 Hz control loop — each tick calls Cosmos3-Edge, records the action plan. Curator scores every episode on-device. Sync-agent batches curated episodes to the hub. Rejects never leave."
+**Talk track:** "Robot-sim runs a 1 Hz control loop. Each tick sends a real BridgeData2 robot image to Cosmos3-Edge's Reasoner — image + scene instruction → structured action reasoning. The Reasoner picks between two real robot action trajectories: a physically-plausible one and a jerky one. The curator scores that selection — confidence, action smoothness, valid JSON output. Bad selections and injected failures never leave the device."
 
 ### 2.2 Watch the On-Device Pipeline
 
@@ -140,10 +155,11 @@ ssh thor "KUBECONFIG=/var/lib/microshift/resources/kubeadmin/kubeconfig \
 ```
 
 Show:
-- Curator PASS/REJECT decisions (planted 30% failure rate)
+- Curator: `PASS <id> score=0.780 (clean: smoothness=0.07 conf=0.82 good=5/5)` scrolling
+- Curator: `REJECT <id> score=0.050 (injected-failure)` for the 30% bad episodes
 - Sync-agent: `[sync-agent] Uploaded <id> -> episodes-curated/<id>.json, manifest -> episode-manifests`
-- MinIO console: curated bucket filling up
-- Hub Kafka: `episode-manifests` consumer offset advancing (via Argo CD or `oc exec`)
+- MinIO console: curated bucket filling with episode JSON files
+- Hub Kafka: `episode-manifests` consumer offset advancing
 
 ### 2.3 Prove the Gate
 
@@ -155,7 +171,7 @@ ssh thor "ls /var/lib/episodes/rejected/ | wc -l"
 ssh thor "ls /var/lib/episodes/sent/ | wc -l"
 ```
 
-**Talk track:** "Two different counts. The rejected ones stayed on the device. That's on-device intelligence as a data flywheel gate."
+**Talk track:** "Two different counts. The injected-failure and low-confidence episodes stayed on the device — the curator caught them. Only episodes where the Reasoner produced valid, confident, smooth action selections made it to the hub. The flywheel is only as good as the data that feeds it."
 
 ### 2.4 Hub Manifest Consumer Hits Threshold
 
@@ -202,70 +218,122 @@ ssh thor "KUBECONFIG=/var/lib/microshift/resources/kubeadmin/kubeconfig \
 
 ---
 
-## Act 3 — Model Promotion (~4 min)
+## Act 3 — "Dream Before Deploy" + Promotion (~5 min)
 
-**Story:** The pipeline produces a better checkpoint, packages it, signs it, and opens a PR. Merge → the device upgrades without a reboot.
+**Story:** The pipeline produces a fine-tuned Reasoner, packages it, signs it, opens a PR. But before merging — we let the world model dream. After merging — the device upgrades without a reboot and dreams again. The two dreams are the quantitative evidence of flywheel improvement.
 
 > [!NOTE]
-> For time-compressed demos: pipeline's `max_steps=50` produces a quick run. The PR shown contains
-> real Gate 1 artifacts. Have the "real pre-completed" eval report pre-baked as a fallback if the
-> live run hasn't finished — never show fake output, just compressed time.
+> For time-compressed demos: pipeline `max_steps=50` (~5-8 min on L40S). The PR contains real
+> Gate 1 reasoning-quality artifacts and Gate 2 dream URIs. Have pre-baked dream videos ready
+> as a fallback if the live dreamer run takes longer than expected. Never show fake output.
+
+### 3.0 Pre-Act: Generate the v1 "Before" Dream
+
+**This runs BEFORE the promotion PR is merged** — it shows what the current model dreams.
+
+```bash
+# Scale the dreamer to process curated episodes with the v1 model
+ssh thor "KUBECONFIG=/var/lib/microshift/resources/kubeadmin/kubeconfig \
+  oc scale deployment dreamer -n flywheel --replicas=1"
+
+# Watch the dreamer produce the v1 rollout video
+ssh thor "KUBECONFIG=/var/lib/microshift/resources/kubeadmin/kubeconfig \
+  oc logs -f deployment/dreamer -n flywheel"
+```
+
+Expected output:
+```
+[dreamer] Submitting Forward Dynamics job (domain=umi frames=17 steps=20)
+[dreamer] Polling job <id>...
+[dreamer] Job <id> completed in 2.6s
+[dreamer] Downloaded rollout: 892KB
+[dreamer] Uploaded dream: s3://eval-reports/dreams/<episode_id>-cosmos3-edge-v1.mp4
+[dreamer] DREAM COMPLETE <episode_id> scene=pick_place model=cosmos3-edge-v1 mp4=892KB
+```
+
+**Stop the dreamer after the v1 dream is generated** (GPU must be free for vLLM):
+```bash
+ssh thor "KUBECONFIG=/var/lib/microshift/resources/kubeadmin/kubeconfig \
+  oc scale deployment dreamer -n flywheel --replicas=0"
+```
+
+**Talk track:** "Cosmos3-Edge's Forward Dynamics mode takes a real robot image and a real action trajectory, and simulates what would happen. This is the 'dream before deploy' capability. We're about to promote a new model — let's see what the current model predicts first."
+
+Show the v1 rollout MP4 from MinIO (download from `s3://eval-reports/dreams/*-v1.mp4`).
 
 ### 3.1 Show the Promotion PR
 
-After the KFP pipeline completes, a PR is automatically opened against this repo:
-
-- PR title: `[promote] cosmos3-edge v2`
-- PR body: Gate 1 eval table (loss, val pass-rate), modelcar digest by-digest
-- Files changed: `gitops/vllm-cosmos3/deployment-green.yaml` (updated modelcar digest + MODEL_VERSION=v2)
+The KFP pipeline opens a PR automatically:
 
 ```bash
-# From your laptop:
 gh pr list --repo jeremyary/thor-testing
 ```
 
-**Talk track:** "The pipeline did this. No human assembled the PR. The eval artifacts are real. Gate 3 is ours — we review and merge."
+PR body contains:
+- Gate 1: reasoning parse rate + good-selection rate (reasoning quality metrics)
+- Gate 2: v1 dream URI + "v2 generated post-merge" placeholder
+- Modelcar digest (by-digest, sigstore-signed)
+
+**Talk track:** "The pipeline assessed the fine-tuned Reasoner on reasoning quality — how often it produces valid structured output, how often it selects the physically-plausible action. Gate 2 references the dream we just saw. Gate 3 is ours."
 
 ### 3.2 Merge and Watch Argo Sync
 
-Merge the PR from the GitHub UI (or `gh pr merge --squash`).
+Merge from GitHub UI (or `gh pr merge --squash`).
 
 ```bash
-# Watch Argo pick it up
 oc get application vllm-cosmos3-thor -n openshift-gitops -w
 ```
 
-Argo syncs `deployment-green.yaml`. On the device:
+On Thor:
 ```bash
 ssh thor "KUBECONFIG=/var/lib/microshift/resources/kubeadmin/kubeconfig \
   oc get pods -n vllm -w"
 ```
 
-The green initContainer pulls the new modelcar:
-- CRI-O enforces `sigstoreSigned` policy — signature verified before pull
-- Modelcar copy to `/root/.cache/huggingface` completes
-- vLLM-Omni starts with the new checkpoint
+Green pod starts → initContainer pulls new modelcar → CRI-O enforces `sigstoreSigned` → vLLM-Omni loads the SFT checkpoint. ~5 min model load time (single GPU, Recreate strategy).
 
 ### 3.3 The Selector Flips
 
-The same PR set `deployment.yaml` replicas=0 (blue goes dark) and `service.yaml` selector=green. Confirm:
 ```bash
 oc get svc cosmos3-edge -n vllm -o jsonpath='{.spec.selector}'
 # -> {"app":"cosmos3-edge","color":"green"}
-
-# Port 30800 now routes to v2
 curl http://10.0.0.42:30800/v1/models
 ```
 
-### 3.4 Before/After in Perses
+**Talk track:** "Git merge. That's it. Argo synced the change through ACM's cluster-proxy — zero inbound connections — CRI-O verified the signature against our private RHTAS Rekor, and now port 30800 serves the fine-tuned model."
 
-Open the Perses dashboard — "Model Version Promotion" section:
-- **v1 panel** (left): existing control-tick traces, MODEL_VERSION=cosmos3-edge-v1
-- **v2 panel** (right): new traces starting now, MODEL_VERSION=cosmos3-edge-v2
+### 3.4 Generate the v2 "After" Dream — THE MONEY SHOT
 
-Re-run the Act 1 inference request and compare response quality.
+```bash
+# Update dreamer to use v2 model version label
+ssh thor "KUBECONFIG=/var/lib/microshift/resources/kubeadmin/kubeconfig \
+  oc set env deployment/dreamer -n flywheel MODEL_VERSION=cosmos3-edge-v2 && \
+  oc scale deployment dreamer -n flywheel --replicas=1"
 
-**Talk track:** "Same prompt. Different model. The difference is what the flywheel trained on — data generated by THIS device, curated by THIS model, promoted through THIS pipeline. It's self-improving."
+# Watch
+ssh thor "KUBECONFIG=/var/lib/microshift/resources/kubeadmin/kubeconfig \
+  oc logs -f deployment/dreamer -n flywheel"
+```
+
+Show the v2 rollout MP4 from MinIO. Compare side-by-side with the v1 dream.
+
+**What to look for:** the fine-tuned Reasoner selects the physically-plausible action chunk more reliably (higher good_selections rate). The Forward Dynamics rollout shows a smoother, more purposeful arm trajectory because the action quality input is better.
+
+```bash
+# Scale dreamer back to 0
+ssh thor "KUBECONFIG=/var/lib/microshift/resources/kubeadmin/kubeconfig \
+  oc scale deployment dreamer -n flywheel --replicas=0"
+```
+
+**Talk track:** "Before: the model's action selection was mixed — 60% good picks. After: the flywheel trained it on the device's own curated experience, and the selection improved. The dream shows you what the robot would do with the new model — before you actually deploy it to a fleet. This is what 'dream before deploy' means in practice."
+
+### 3.5 Reasoning Quality in Perses
+
+Open Perses → "Reasoning Quality Step-Change by Model Version":
+- **v1 panel** (left): reasoning spans for cosmos3-edge-v1 — baseline confidence and selection quality
+- **v2 panel** (right): reasoning spans for cosmos3-edge-v2 — higher confidence, more consistent good selections
+
+**Talk track:** "The quantitative evidence. Same world model. The flywheel improved how it reasons about physical scenes."
 
 ---
 
@@ -324,18 +392,10 @@ ssh thor "ip link set enP2p1s0 up"
 | No GPU node appears | L40S machinepool must exist + autoscaler enabled; confirm with `oc get machinesets` |
 | Blue/green: wrong side active | `oc get svc cosmos3-edge -n vllm -o jsonpath='{.spec.selector}'` — flip via git commit if wrong |
 | Stale UnexpectedAdmissionError pods | `oc delete pod -n vllm --field-selector status.phase!=Running` |
+| Dreamer hung / no output | Scale to 0, check GPU is free (cosmos3-edge must not be serving), scale back to 1 |
+| Dreamer: "Frame not found" | `ssh thor "ls /var/lib/robot-sim/frames/"` — re-scp if missing |
+| v1/v2 dream looks the same | Expected for max_steps=50 (minimal training); use pre-baked videos from full run |
 | Catastrophic failure | Switch to pre-recorded video |
 
----
 
-## Failure Recovery
-
-| Problem | Fix |
-|---------|-----|
-| Cosmos3-Edge not responding | `ssh root@thor "KUBECONFIG=... oc delete pod -n vllm -l app=cosmos3-edge"` — wait 5 min for model reload |
-| GPU compute failure (error 100) | `ssh root@thor "systemctl restart nvidia-gpu-reset"` |
-| MicroShift not starting | `ssh root@thor "systemctl restart microshift"` — wait 2 min |
-| Thor unreachable | Power cycle, wait 3 min for boot + GPU reset + MicroShift |
-| Argo not syncing | `oc patch application.argoproj.io <app> -n openshift-gitops --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}'` |
-| Flywheel won't stop (coil whine) | `ssh root@thor "KUBECONFIG=... oc scale deployment robot-sim curator -n flywheel --replicas=0"` |
 | Catastrophic failure | Switch to pre-recorded video |

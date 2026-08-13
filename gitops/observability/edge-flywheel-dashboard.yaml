@@ -2,9 +2,9 @@
 #
 # PersesDashboard for the Physical AI Edge Flywheel.
 #
-# Data sources (all flow through the device-side OTel collector → hub Tempo):
+# Data sources (all flow through the device-side OTel collector -> hub Tempo):
 #
-# Traces (properly nested — robot-sim sets start_as_current_span for nesting):
+# Traces (properly nested -- robot-sim sets start_as_current_span for nesting):
 #   - robot-sim "episode" root spans (service.name=robot-sim)
 #     Attributes: episode.id, episode.scene, episode.ticks,
 #                 episode.avg_latency_ms, episode.all_within_budget, episode.has_failure
@@ -19,9 +19,9 @@
 #   device.id=thor, device.type=jetson-agx-thor, model.version=<envvar from Deployment>
 #
 # model.version step-change: the last two panels show control-tick latency filtered
-# to cosmos3-edge-v1 and cosmos3-edge-v2 respectively. After a promotion (blue→green
+# to cosmos3-edge-v1 and cosmos3-edge-v2 respectively. After a promotion (blue->green
 # flip), v2 traces appear; the delta between the two panels is the "dream before
-# deploy" payoff — the promoted model should show lower avg latency and higher
+# deploy" payoff -- the promoted model should show lower avg latency and higher
 # within-budget rate. demo Act 3 beat: open both panels side-by-side in Perses.
 #
 # Metrics (Prometheus scrape of vLLM /metrics + hostmetrics receiver):
@@ -39,7 +39,7 @@ metadata:
 spec:
   config:
     display:
-      name: "Physical AI Edge Flywheel — Thor"
+      name: "Physical AI Edge Flywheel -- Thor"
     duration: 1h
     refreshInterval: 30s
     variables: []
@@ -63,10 +63,10 @@ spec:
       - kind: Grid
         spec:
           display:
-            title: "Inference Latency"
+            title: "Reasoning Quality (D030-A)"
           items:
             - content:
-                $ref: "#/spec/panels/inferenceLatency"
+                $ref: "#/spec/panels/reasoningSpans"
               height: 8
               width: 24
               x: 0
@@ -74,7 +74,7 @@ spec:
       - kind: Grid
         spec:
           display:
-            title: "Episode Failures"
+            title: "Injected Failures (curation gate)"
           items:
             - content:
                 $ref: "#/spec/panels/episodeFailures"
@@ -85,16 +85,16 @@ spec:
       - kind: Grid
         spec:
           display:
-            title: "Model Version Promotion (step-change)"
+            title: "Reasoning Quality Step-Change by Model Version (D030-B)"
           items:
             - content:
-                $ref: "#/spec/panels/tickLatencyV1"
+                $ref: "#/spec/panels/reasoningQualityV1"
               height: 8
               width: 12
               x: 0
               "y": 0
             - content:
-                $ref: "#/spec/panels/tickLatencyV2"
+                $ref: "#/spec/panels/reasoningQualityV2"
               height: 8
               width: 12
               x: 12
@@ -104,7 +104,7 @@ spec:
         kind: Panel
         spec:
           display:
-            name: "Episode Traces (robot-sim → Cosmos3-Edge)"
+            name: "Episode Traces (robot-sim -> Cosmos3-Edge)"
             description: "Root spans from robot-sim episodes. Each episode contains multiple inference child spans."
           plugin:
             kind: Table
@@ -134,12 +134,17 @@ spec:
                     datasource:
                       kind: TempoDatasource
                     query: '{resource.service.name="robot-sim" && name="episode"}'
-      inferenceLatency:
+      reasoningSpans:
         kind: Panel
         spec:
           display:
-            name: "Inference Span Latency"
-            description: "Individual inference call durations from robot-sim to Cosmos3-Edge."
+            name: "Reasoner Spans (embodied reasoning, D030)"
+            description: >
+              Reasoner spans from robot-sim. Each row is one embodied-reasoning call
+              to Cosmos3-Edge (image + scene -> structured action selection).
+              Key attributes: reasoning.valid, reasoning.action_selected,
+              reasoning.confidence, reasoning.has_frame.
+              Compare with episode spans to see reasoning quality per episode.
           plugin:
             kind: Table
             spec: {}
@@ -151,13 +156,16 @@ spec:
                   spec:
                     datasource:
                       kind: TempoDatasource
-                    query: '{resource.service.name="robot-sim" && name="inference"}'
+                    query: '{resource.service.name="robot-sim" && name="reasoner"}'
       episodeFailures:
         kind: Panel
         spec:
           display:
-            name: "Failed Episodes"
-            description: "Episodes where episode.has_failure=true (injected or real)."
+            name: "Injected Failures (curation rejects)"
+            description: >
+              Episodes where episode.has_failure=true. These are curator-rejected
+              episodes that never leave the device -- the on-device data quality gate.
+              30% injection rate by design; curator drops them before sync-agent upload.
           plugin:
             kind: Table
             spec: {}
@@ -170,15 +178,17 @@ spec:
                     datasource:
                       kind: TempoDatasource
                     query: '{resource.service.name="robot-sim" && name="episode" && span.episode.has_failure=true}'
-      tickLatencyV1:
+      reasoningQualityV1:
         kind: Panel
         spec:
           display:
-            name: "Control-Tick Latency — v1 (Before Promotion)"
+            name: "Reasoning Quality -- v1 (Before Promotion)"
             description: >
-              Traces for control-tick spans where resource.model.version=cosmos3-edge-v1.
-              Each row is one 200ms tick; tick.elapsed_ms shows actual latency vs the
-              200ms budget. After promotion this panel goes quiet as v2 takes over.
+              Reasoner spans for cosmos3-edge-v1 (base model, before Reasoner SFT).
+              Key signals: reasoning.valid (JSON parse rate), reasoning.action_selected
+              (good vs bad), reasoning.confidence. Low confidence and mixed
+              good/bad selections are expected before fine-tuning.
+              After promotion this panel goes quiet as v2 takes over.
           plugin:
             kind: Table
             spec: {}
@@ -190,17 +200,19 @@ spec:
                   spec:
                     datasource:
                       kind: TempoDatasource
-                    query: '{resource.service.name="robot-sim" && name="control-tick" && resource.model.version="cosmos3-edge-v1"}'
-      tickLatencyV2:
+                    query: '{resource.service.name="robot-sim" && name="reasoner" && resource.model.version="cosmos3-edge-v1"}'
+      reasoningQualityV2:
         kind: Panel
         spec:
           display:
-            name: "Control-Tick Latency — v2 (After Promotion)"
+            name: "Reasoning Quality -- v2 (After Promotion)"
             description: >
-              Traces for control-tick spans where resource.model.version=cosmos3-edge-v2.
-              Populated only after the blue→green promotion flip lands (deployment-green.yaml
-              sets MODEL_VERSION=cosmos3-edge-v2). Compare avg duration with the v1 panel
-              to show the trained model's throughput improvement.
+              Reasoner spans for cosmos3-edge-v2 (Reasoner SFT checkpoint).
+              Populated after the blue->green promotion flip (deployment-green.yaml
+              MODEL_VERSION=cosmos3-edge-v2). Compare reasoning.confidence and
+              reasoning.action_selected='good' rate vs the v1 panel -- the
+              flywheel improvement is visible as higher confidence and more
+              consistent good-action selections (D030-A quantitative evidence).
           plugin:
             kind: Table
             spec: {}
@@ -212,7 +224,7 @@ spec:
                   spec:
                     datasource:
                       kind: TempoDatasource
-                    query: '{resource.service.name="robot-sim" && name="control-tick" && resource.model.version="cosmos3-edge-v2"}'
+                    query: '{resource.service.name="robot-sim" && name="reasoner" && resource.model.version="cosmos3-edge-v2"}'
   instanceSelector:
     matchLabels:
       app.kubernetes.io/name: edge-perses
