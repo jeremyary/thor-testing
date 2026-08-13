@@ -119,6 +119,8 @@ data:
 
     def build_ssl_context() -> ssl.SSLContext:
         ctx = ssl.create_default_context(cafile=KAFKA_CA_FILE)
+        ctx.check_hostname = False
+        ctx.verify_mode    = ssl.CERT_REQUIRED  # verify cert, just not hostname
         return ctx
 
     def run() -> None:
