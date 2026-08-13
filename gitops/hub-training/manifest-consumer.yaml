@@ -232,10 +232,10 @@ spec:
               value: "hub-manifest-consumer"
             - name: DSP_URL
               value: "https://ds-pipeline-dspa.vla-training.svc:8443"
-            # Populate once the Phase 4 training pipeline is registered in DSP.
-            # Until then, the consumer counts and logs but does not submit runs.
+            # Pipeline ID for the cosmos3-edge-finetune pipeline registered in DSP.
+            # Set by upload_pipeline.sh; updated here after each re-upload.
             - name: TRAINING_PIPELINE_ID
-              value: ""
+              value: "b2ae4cdd-fa8a-441d-aaf0-17c77bc6f487"
           resources:
             requests:
               cpu: 50m
