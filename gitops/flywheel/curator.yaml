@@ -6,85 +6,74 @@ metadata:
   namespace: flywheel
 data:
   curator.py: |
-    """On-device episode curator — scores episodes on embodied-reasoning quality.
+    """On-device episode curator -- Generator quality scoring (D031 / Option E).
 
-    DESIGN (D030-C / D030-A): Curation signal is reasoning quality and action-
-    selection quality, NOT HTTP latency. Latency is an infrastructure metric;
-    it says nothing about whether the world model chose the right action.
+    Scores episodes on GENERATOR OUTPUT QUALITY:
+    1. Was the Text-to-Image generation successful? (gen_ok)
+    2. Was the Action Policy prediction successful? (policy_ok)
+    3. Is the predicted action trajectory physically plausible? (smoothness)
+    4. Was this an injected failure? (always reject)
 
-    Scoring rubric:
-      1. Injected failure              -> 0.0  (explicit bad signal, never train on)
-      2. Reasoning parse failures      -> 0.1 per bad tick  (model couldn't reason)
-      3. Action selection quality      -> based on action_smoothness
-           smoothness < SMOOTHNESS_THRESHOLD: GOOD (low delta = physically plausible)
-           smoothness >= threshold:           penalty  (high delta = jerky/implausible)
-      4. Reasoning confidence          -> weighted bonus (avg_confidence)
-      5. Good-selection ratio          -> bonus for majority-good ticks
-
-    The resulting score is the training signal for the Reasoner SFT: high-score
-    episodes (model reasoned validly and selected physically-plausible actions)
-    become training examples; low-score episodes are rejected on-device.
+    This is the curation signal for the Generator-native flywheel. High-score
+    episodes (model generated coherent images and predicted smooth action
+    trajectories) become training examples for Vision SFT. Low-score episodes
+    are rejected on-device and never reach the hub.
     """
     import json, os, time, pathlib
 
-    RAW_DIR             = pathlib.Path(os.environ.get("RAW_DIR",      "/data/episodes/raw"))
-    CURATED_DIR         = pathlib.Path(os.environ.get("CURATED_DIR",  "/data/episodes/curated"))
-    REJECTED_DIR        = pathlib.Path(os.environ.get("REJECTED_DIR", "/data/episodes/rejected"))
-    PASS_THRESHOLD      = float(os.environ.get("PASS_THRESHOLD",      "0.5"))
+    RAW_DIR              = pathlib.Path(os.environ.get("RAW_DIR",      "/data/episodes/raw"))
+    CURATED_DIR          = pathlib.Path(os.environ.get("CURATED_DIR",  "/data/episodes/curated"))
+    REJECTED_DIR         = pathlib.Path(os.environ.get("REJECTED_DIR", "/data/episodes/rejected"))
+    PASS_THRESHOLD       = float(os.environ.get("PASS_THRESHOLD",      "0.5"))
     SMOOTHNESS_THRESHOLD = float(os.environ.get("SMOOTHNESS_THRESHOLD", "0.15"))
 
     def score_episode(episode: dict) -> tuple[float, str]:
-        """Return (score 0.0-1.0, reason string)."""
-        ticks = episode.get("tick_data", [])
-        n     = max(len(ticks), 1)
-
-        # Gate 0: injected failures never leave the device
+        # Gate 0: injected failures
         if episode.get("has_failure"):
             return 0.0, "injected-failure"
 
-        # Gate 1: reasoning parse failures
-        bad_ticks = [t for t in ticks if not t.get("reasoning", {}).get("valid", False)]
-        if len(bad_ticks) == n:
-            return 0.1, f"all-reasoning-invalid ({n}/{n} ticks)"
+        score  = 1.0
+        parts  = []
 
-        parse_penalty = len(bad_ticks) / n * 0.3  # up to -0.30 for parse failures
+        # Gate 1: generation success
+        gen = episode.get("generation", {})
+        if gen.get("status") != "ok":
+            score -= 0.4
+            parts.append(f"gen-failed({gen.get('status','')})")
+        elif gen.get("image_size", 0) < 1000:
+            score -= 0.2
+            parts.append("gen-tiny-image")
 
-        # Gate 2: action smoothness (lower = more physically plausible)
-        avg_smoothness = episode.get("avg_smoothness", 0.0)
-        if avg_smoothness >= SMOOTHNESS_THRESHOLD:
-            # Jerky trajectory — scale penalty by how far over threshold
-            excess    = avg_smoothness - SMOOTHNESS_THRESHOLD
-            smooth_pen = min(0.4, excess * 2.0)  # up to -0.40
-        else:
-            smooth_pen = 0.0
+        # Gate 2: policy success
+        pol = episode.get("policy", {})
+        if pol.get("status") not in ("ok", "fallback"):
+            score -= 0.3
+            parts.append(f"policy-failed({pol.get('status','')})")
 
-        # Bonus: reasoning confidence
-        conf_bonus = episode.get("avg_confidence", 0.0) * 0.2  # up to +0.20
+        # Gate 3: action trajectory smoothness
+        smoothness = episode.get("avg_smoothness", pol.get("smoothness", 0.0))
+        if smoothness >= SMOOTHNESS_THRESHOLD:
+            excess    = smoothness - SMOOTHNESS_THRESHOLD
+            penalty   = min(0.3, excess * 2.0)
+            score    -= penalty
+            parts.append(f"jerky(s={smoothness:.4f})")
 
-        # Bonus: good-selection ratio
-        good = episode.get("good_selections", 0)
-        sel_bonus = (good / n) * 0.1  # up to +0.10
-
-        raw_score = 1.0 - parse_penalty - smooth_pen + conf_bonus + sel_bonus
-        score     = round(max(0.0, min(1.0, raw_score)), 3)
+        score = round(max(0.0, min(1.0, score)), 3)
 
         if score >= PASS_THRESHOLD:
             reason = (
-                f"clean (smoothness={avg_smoothness:.4f} "
-                f"conf={episode.get('avg_confidence',0):.2f} "
-                f"good={good}/{n})"
+                f"clean (gen={gen.get('status','')} "
+                f"policy={pol.get('status','')} "
+                f"smoothness={smoothness:.4f})"
             )
         else:
-            parts = []
-            if parse_penalty > 0:   parts.append(f"parse-failures={len(bad_ticks)}/{n}")
-            if smooth_pen   > 0:    parts.append(f"jerky-trajectory(s={avg_smoothness:.4f})")
-            reason = " ".join(parts) or "low-quality"
+            reason = " ".join(parts) if parts else "low-quality"
 
         return score, reason
 
     if __name__ == "__main__":
         print(
-            f"[curator] Starting — embodied-reasoning quality scorer\n"
+            f"[curator] Starting -- Generator quality scoring (D031)\n"
             f"  pass_threshold={PASS_THRESHOLD} "
             f"smoothness_threshold={SMOOTHNESS_THRESHOLD}\n"
             f"  watching {RAW_DIR}",
@@ -146,10 +135,6 @@ spec:
           env:
             - name: PASS_THRESHOLD
               value: "0.5"
-            # SMOOTHNESS_THRESHOLD: max acceptable mean joint-delta per step.
-            # Below = physically plausible trajectory; above = jerky / penalised.
-            # 0.15 is empirically calibrated against the UMI action chunk norms
-            # in assets/bridgedata2/action_pool.json (good chunks ~0.07, bad ~0.35).
             - name: SMOOTHNESS_THRESHOLD
               value: "0.15"
           volumeMounts:

@@ -6,53 +6,50 @@ metadata:
   namespace: flywheel
 data:
   robot_sim.py: |
-    """Simulated robot control loop — embodied reasoning + action-chunk selection.
+    """Simulated robot control loop -- Generator-native flywheel (D031 / Option E).
 
-    DESIGN (D030): This is NOT a text chatbot. It exercises two real Cosmos3-Edge
-    capabilities on each control tick:
+    DESIGN: This uses vLLM-Omni's ACTUAL Generator capabilities, not a text
+    chatbot facade. The Cosmos3OmniDiffusersPipeline (--omni mode) is a
+    Generator-only pipeline; its lm_head is discarded at load time, making
+    text output structurally impossible. This robot-sim works WITH that
+    architecture instead of fighting it.
 
-    1. REASONER (embodied reasoning mode):
-       - Input: real BridgeData2 frame (256x256 RGB JPEG) + scene instruction
-       - Output: structured reasoning about the scene and which action to take
-       - API: POST /v1/chat/completions with image_url content block (VLM input)
-       - This is Cosmos3-Edge's documented "Action CoT / embodied reasoning" task
+    Per episode:
+    1. TEXT-TO-IMAGE: POST /v1/images/generations with a scene prompt.
+       Returns a base64 PNG -- the world model's imagined scene.
+       This proves the Generator is alive and producing coherent output.
 
-    2. ACTION SELECTION (ii-b pattern, D030-C):
-       - Two candidate action chunks per scene are pre-loaded from the action pool
-         (real UMI/DROID-format normalized joint trajectories from NVIDIA examples)
-       - The Reasoner's output determines WHICH candidate is selected (good vs. bad)
-       - The selected action chunk is recorded with the episode for Forward Dynamics
-       - The Curator scores selection quality (structural validity + consistency)
+    2. ACTION POLICY: POST /v1/videos (async) with action_mode=policy,
+       a BridgeData2 conditioning frame, and a task instruction.
+       Returns predicted DROID action chunks + a rollout video.
+       This is the model's core Physical AI capability.
 
-    OTel trace shape (properly nested):
+    3. RECORD: Episode captures the generated image, action chunk, rollout
+       quality metrics (smoothness, validity), and the conditioning frame
+       reference. The curator scores these on generation quality, not text.
 
-        episode  [episode.id, model.version, scene, frame_path]
-          control-tick  [tick.number, tick.budget_ms, tick.elapsed_ms]
-            reasoner    [reasoning.valid, reasoning.action_selected, reasoning.confidence]
-              ^ W3C traceparent injected into vLLM request
-              ^ W3C traceparent header injected into the vLLM-Omni HTTP request so
-                vLLM's own OTLP spans (queue/prefill/decode) appear as children here.
+    The flywheel improves the Generator via cosmos-framework Vision SFT
+    (launch_sft_vision_edge.sh), which fine-tunes T2I/I2V/T2V quality
+    directly. After promotion, the model generates better scenes and
+    predicts smoother action trajectories.
 
-    OTLP endpoint: uses NODE_IP (downward-API from status.hostIP) + port 4318 so
-    the pod reaches the host-level OTel collector systemd service. 127.0.0.1 would
-    resolve to the container's own loopback and silently drop all spans.
+    OTel trace shape:
+        episode  [episode.id, model.version, scene]
+          generate-scene    [gen.status, gen.size_bytes]
+          action-policy     [policy.status, policy.chunk_size, policy.smoothness]
     """
-    import json, os, time, uuid, random, requests, pathlib
-    from contextlib import contextmanager
-
-    import json, os, time, uuid, random, requests, pathlib, base64
+    import json, os, time, uuid, random, pathlib, base64, urllib.request, urllib.error
     from contextlib import contextmanager
 
     VLLM_URL          = os.environ.get("VLLM_URL", "http://cosmos3-edge.vllm.svc:8000")
-    TICK_HZ           = float(os.environ.get("TICK_HZ", "1"))
     EPISODE_DIR       = pathlib.Path(os.environ.get("EPISODE_DIR", "/data/episodes/raw"))
     FRAMES_DIR        = pathlib.Path(os.environ.get("FRAMES_DIR", "/data/frames"))
     ACTION_POOL_FILE  = pathlib.Path(os.environ.get("ACTION_POOL_FILE", "/data/action_pool.json"))
-    TICKS_PER_EPISODE = int(os.environ.get("TICKS_PER_EPISODE", "5"))
+    EPISODES_PER_CYCLE = int(os.environ.get("EPISODES_PER_CYCLE", "5"))
     FAILURE_RATE      = float(os.environ.get("FAILURE_RATE", "0.3"))
     MODEL_VERSION     = os.environ.get("MODEL_VERSION", "cosmos3-edge-v1")
     OTEL_ENDPOINT     = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318")
-    TICK_BUDGET_MS    = 1000.0 / TICK_HZ
+    COOLDOWN_S        = float(os.environ.get("EPISODE_COOLDOWN_S", "15"))
 
     tracer      = None
     otel_inject = None
@@ -83,182 +80,25 @@ data:
         else:
             yield None
 
-    # ---------------------------------------------------------------------------
-    # SCENES: tabletop manipulation archetypes matching BridgeData2 distribution.
-    # Each maps to a real 256x256 first-frame from nvidia/BridgeData2-Subset-
-    # Synthetic-Captions (see assets/bridgedata2/ATTRIBUTION.md).
-    # Updated per D030-E: replaced non-applicable scenes (sidewalk, hallway) with
-    # real WidowX manipulation scenarios.
-    # ---------------------------------------------------------------------------
+    # ---- Scenes (tabletop manipulation, matching BridgeData2) ----------------
     SCENES = {
-        "pick_place":   "A robotic arm must pick up an object from a tray and place it in the target position.",
-        "sort_objects": "A robotic arm must sort and arrange small objects by type on a rectangular tray.",
-        "open_close":   "A robotic arm must interact with a container or appliance in a kitchen environment.",
-        "push_sweep":   "A robotic arm must push or sweep objects across a tray surface.",
-        "pour":         "A robotic arm must gather and reposition scattered items using the gripper.",
+        "pick_place":   "A robotic arm picks up an object from a white tray and places it precisely in the target position on a wooden table.",
+        "sort_objects": "A robotic arm sorts small translucent objects by type, carefully arranging them on a rectangular tray.",
+        "open_close":   "A robotic arm interacts with a small pot and lemon on a kitchen stovetop, repositioning items carefully.",
+        "push_sweep":   "A robotic arm sweeps small beads across a white tray using a controlled scraping motion.",
+        "pour":         "A robotic arm gathers scattered almonds on a white tray, moving them to a collection area with the gripper.",
     }
 
     def load_action_pool() -> dict:
-        """Load pre-computed candidate action chunks from asset file.
-        Falls back to a minimal valid stub if the file isn't mounted yet."""
         if ACTION_POOL_FILE.exists():
             return json.loads(ACTION_POOL_FILE.read_text())
-        # Fallback: zero-action stub so the sim can still run without assets
         print("[robot-sim] WARNING: action_pool.json not found, using zero stub", flush=True)
-        stub_chunk = [[0.0] * 10 for _ in range(16)]
-        return {
-            s: {"good": stub_chunk, "bad": stub_chunk,
-                "domain_name": "umi", "action_chunk_size": 16, "fps": 20, "dims": 10}
-            for s in SCENES
-        }
-
-    def load_frame_b64(scene_name: str) -> str | None:
-        """Load the BridgeData2 first-frame for this scene as a base64 data URI.
-        Returns None if the frame file isn't mounted (falls back to text-only reasoning)."""
-        frame_path = FRAMES_DIR / f"{scene_name}.jpg"
-        if frame_path.exists():
-            data = base64.b64encode(frame_path.read_bytes()).decode()
-            return f"data:image/jpeg;base64,{data}"
-        return None
-
-    def call_reasoner(scene_name: str, scene_desc: str,
-                      frame_b64: str | None, action_pool: dict) -> dict:
-        """Call Cosmos3-Edge Reasoner in embodied-reasoning / Action CoT mode.
-
-        Input: real BridgeData2 frame (if available) + scene instruction.
-        Output: structured reasoning about which candidate action chunk to select.
-
-        This is the Cosmos3-Edge Reasoner's documented 'embodied reasoning /
-        action CoT' workflow, NOT a generic text chatbot call. The image+text
-        input uses the VLM message format (Qwen3-VL compatible, per Cosmos docs).
-        """
-        http_headers = {}
-        if otel_inject:
-            otel_inject(http_headers)
-
-        # Build VLM-style message: image conditioning + instruction
-        # Cosmos3-Edge Reasoner follows Qwen3-VL message conventions
-        if frame_b64:
-            user_content = [
-                {"type": "image_url", "image_url": {"url": frame_b64}},
-                {"type": "text", "text": (
-                    f"Scene: {scene_desc}\n\n"
-                    "You are a robot arm controller. Examine the scene and determine "
-                    "the appropriate action strategy. Output structured JSON with keys:\n"
-                    "  action_strategy: one of ['direct_grasp', 'reposition_first', "
-                    "'sweep_approach', 'careful_placement', 'assess_first']\n"
-                    "  confidence: float 0.0-1.0\n"
-                    "  reasoning: brief physical reasoning (1-2 sentences)\n"
-                    "  select_action: 'good' or 'bad' (whether the primary action "
-                    "candidate fits the scene)\n"
-                    "Respond with JSON only."
-                )},
-            ]
-        else:
-            # Fallback: text-only when frame not mounted
-            user_content = (
-                f"Scene: {scene_desc}\n\n"
-                "Output structured JSON with keys: action_strategy, confidence "
-                "(0.0-1.0), reasoning (1-2 sentences), select_action ('good' or 'bad')."
-            )
-
-        with maybe_span("reasoner",
-                        **{"reasoning.scene": scene_name,
-                           "reasoning.has_frame": frame_b64 is not None,
-                           "reasoning.model": "nvidia/Cosmos3-Edge"}) as r_span:
-            t0 = time.monotonic()
-            try:
-                resp = requests.post(
-                    f"{VLLM_URL}/v1/chat/completions",
-                    headers=http_headers,
-                    json={
-                        "model": "nvidia/Cosmos3-Edge",
-                        "messages": [
-                            {"role": "system", "content": (
-                                "You are Cosmos3-Edge, a physical AI world model. "
-                                "Analyze robot manipulation scenes and reason about "
-                                "appropriate action strategies."
-                            )},
-                            {"role": "user", "content": user_content},
-                        ],
-                        "max_tokens": 200,
-                        "temperature": 0.6,
-                    },
-                    timeout=45,
-                )
-                resp.raise_for_status()
-                latency_ms = resp.elapsed.total_seconds() * 1000
-                raw = resp.json()["choices"][0]["message"]["content"]
-
-                # Parse reasoning output
-                reasoning = _parse_reasoning(raw)
-                selected  = reasoning.get("select_action", "good")
-
-                if r_span:
-                    r_span.set_attribute("reasoning.latency_ms",      round(latency_ms, 1))
-                    r_span.set_attribute("reasoning.valid",            reasoning.get("valid", False))
-                    r_span.set_attribute("reasoning.action_selected",  selected)
-                    r_span.set_attribute("reasoning.confidence",       reasoning.get("confidence", 0.0))
-                    r_span.set_attribute("reasoning.status",           "ok")
-
-                # Resolve action chunk from pool based on Reasoner's selection
-                pool_entry  = action_pool.get(scene_name, {})
-                action_chunk = pool_entry.get(selected, pool_entry.get("good", []))
-
-                return {
-                    "reasoning":       reasoning,
-                    "action_selected": selected,
-                    "action_chunk":    action_chunk,
-                    "domain_name":     pool_entry.get("domain_name", "umi"),
-                    "chunk_size":      pool_entry.get("action_chunk_size", 16),
-                    "latency_ms":      latency_ms,
-                    "has_frame":       frame_b64 is not None,
-                }
-
-            except Exception as e:
-                elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
-                if r_span:
-                    r_span.set_attribute("reasoning.error",   str(e))
-                    r_span.set_attribute("reasoning.status",  "error")
-                    r_span.set_attribute("reasoning.latency_ms", elapsed_ms)
-                # On error: default to 'good' action chunk
-                pool_entry   = action_pool.get(scene_name, {})
-                action_chunk = pool_entry.get("good", [])
-                return {
-                    "reasoning":       {"valid": False, "error": str(e)},
-                    "action_selected": "good",
-                    "action_chunk":    action_chunk,
-                    "domain_name":     pool_entry.get("domain_name", "umi"),
-                    "chunk_size":      pool_entry.get("action_chunk_size", 16),
-                    "latency_ms":      elapsed_ms,
-                    "has_frame":       frame_b64 is not None,
-                }
-
-    def _parse_reasoning(raw: str) -> dict:
-        """Extract JSON from Reasoner response; return validity + fields."""
-        import re
-        try:
-            # Strip markdown code fences if present
-            cleaned = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
-            # Find first {...} block
-            m = re.search(r"\{.*\}", cleaned, re.DOTALL)
-            if m:
-                d = json.loads(m.group(0))
-                return {
-                    "valid":           True,
-                    "action_strategy": d.get("action_strategy", ""),
-                    "confidence":      float(d.get("confidence", 0.5)),
-                    "reasoning":       d.get("reasoning", ""),
-                    "select_action":   d.get("select_action", "good"),
-                    "raw":             raw[:300],
-                }
-        except Exception:
-            pass
-        return {"valid": False, "raw": raw[:300], "select_action": "good", "confidence": 0.0}
+        stub = [[0.0] * 10 for _ in range(16)]
+        return {s: {"good": stub, "bad": stub, "domain_name": "umi",
+                     "action_chunk_size": 16, "fps": 20, "dims": 10}
+                for s in SCENES}
 
     def _action_smoothness(chunk: list) -> float:
-        """Proxy quality metric: mean L2 norm of successive joint-position deltas.
-        Lower is smoother (more physically plausible). Returns 0.0 for empty/stub."""
         if not chunk or len(chunk) < 2:
             return 0.0
         total = 0.0
@@ -267,144 +107,309 @@ data:
             total += delta ** 0.5
         return round(total / (len(chunk) - 1), 4)
 
+    # ---- Generator API calls -------------------------------------------------
+
+    def call_text_to_image(scene_prompt: str) -> dict:
+        """POST /v1/images/generations -- Text-to-Image generation."""
+        with maybe_span("generate-scene",
+                        **{"gen.model": "nvidia/Cosmos3-Edge",
+                           "gen.prompt_len": len(scene_prompt)}) as span:
+            t0 = time.monotonic()
+            try:
+                body = json.dumps({
+                    "model": "nvidia/Cosmos3-Edge",
+                    "prompt": scene_prompt,
+                    "negative_prompt": "blurry, distorted, low quality",
+                    "size": "640x640",
+                    "n": 1,
+                    "response_format": "b64_json",
+                    "num_inference_steps": 10,
+                    "guidance_scale": 5.0,
+                    "seed": random.randint(0, 999999),
+                    "extra_args": {
+                        "guardrails": False,
+                        "use_resolution_template": False,
+                        "flow_shift": 3.0,
+                    },
+                }).encode()
+                req = urllib.request.Request(
+                    f"{VLLM_URL}/v1/images/generations",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    result = json.loads(resp.read())
+
+                b64_data = result.get("data", [{}])[0].get("b64_json", "")
+                img_bytes = base64.b64decode(b64_data) if b64_data else b""
+                latency_ms = round((time.monotonic() - t0) * 1000, 1)
+
+                if span:
+                    span.set_attribute("gen.status", "ok")
+                    span.set_attribute("gen.latency_ms", latency_ms)
+                    span.set_attribute("gen.size_bytes", len(img_bytes))
+                return {
+                    "status": "ok",
+                    "image_b64": b64_data[:100] + "..." if b64_data else "",
+                    "image_size_bytes": len(img_bytes),
+                    "latency_ms": latency_ms,
+                }
+            except Exception as e:
+                elapsed = round((time.monotonic() - t0) * 1000, 1)
+                if span:
+                    span.set_attribute("gen.status", "error")
+                    span.set_attribute("gen.error", str(e)[:200])
+                    span.set_attribute("gen.latency_ms", elapsed)
+                return {"status": "error", "error": str(e)[:200],
+                        "image_size_bytes": 0, "latency_ms": elapsed}
+
+    def call_action_policy(scene_name: str, task_prompt: str) -> dict:
+        """POST /v1/videos (async) with action_mode=policy -- Action Policy.
+
+        Returns predicted action chunk + rollout video metadata.
+        Uses BridgeData2 conditioning frame from disk.
+        """
+        frame_path = FRAMES_DIR / f"{scene_name}.jpg"
+        with maybe_span("action-policy",
+                        **{"policy.scene": scene_name,
+                           "policy.has_frame": frame_path.exists()}) as span:
+            t0 = time.monotonic()
+            try:
+                if not frame_path.exists():
+                    raise FileNotFoundError(f"Frame not found: {frame_path}")
+
+                # Build multipart form data for the async videos endpoint
+                boundary = "----RobotSimBoundary" + str(random.randint(100000, 999999))
+
+                def text_part(name, value):
+                    return (
+                        f"--{boundary}\r\n"
+                        f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                        f"{value}\r\n"
+                    ).encode()
+
+                frame_bytes = frame_path.read_bytes()
+                file_part = (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="input_reference"; filename="{scene_name}.jpg"\r\n'
+                    f"Content-Type: image/jpeg\r\n\r\n"
+                ).encode() + frame_bytes + b"\r\n"
+
+                extra_params = json.dumps({
+                    "action_mode": "policy",
+                    "domain_name": "bridge_orig_lerobot",
+                    "raw_action_dim": 10,
+                    "action_chunk_size": 16,
+                    "guardrails": False,
+                    "use_resolution_template": False,
+                    "use_duration_template": False,
+                })
+
+                parts = [
+                    text_part("model", "nvidia/Cosmos3-Edge"),
+                    text_part("prompt", task_prompt),
+                    text_part("size", "320x192"),
+                    text_part("num_frames", "17"),
+                    text_part("fps", "5"),
+                    text_part("num_inference_steps", "20"),
+                    text_part("guidance_scale", "1.0"),
+                    text_part("flow_shift", "3.0"),
+                    text_part("seed", str(random.randint(0, 999999))),
+                    text_part("extra_params", extra_params),
+                    file_part,
+                    f"--{boundary}--\r\n".encode(),
+                ]
+                body = b"".join(parts)
+
+                req = urllib.request.Request(
+                    f"{VLLM_URL}/v1/videos",
+                    data=body,
+                    headers={
+                        "Content-Type": f"multipart/form-data; boundary={boundary}",
+                        "Accept": "application/json",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    job = json.loads(resp.read())
+
+                job_id = job.get("id")
+                if not job_id:
+                    raise ValueError(f"No job id: {job}")
+
+                # Poll for completion
+                deadline = time.monotonic() + 120
+                action_data = None
+                while time.monotonic() < deadline:
+                    time.sleep(2)
+                    try:
+                        with urllib.request.urlopen(
+                            f"{VLLM_URL}/v1/videos/{job_id}", timeout=10
+                        ) as resp:
+                            status = json.loads(resp.read())
+                        st = status.get("status", "")
+                        if st == "completed":
+                            action_data = status.get("action")
+                            break
+                        elif st == "failed":
+                            raise RuntimeError(f"Policy job failed: {status}")
+                    except urllib.error.HTTPError:
+                        pass
+
+                latency_ms = round((time.monotonic() - t0) * 1000, 1)
+
+                # Extract action chunk from the response
+                chunk = []
+                if action_data and isinstance(action_data, dict):
+                    raw = action_data.get("data", [])
+                    shape = action_data.get("shape", [])
+                    if raw and len(shape) == 2:
+                        # Reshape flat array into [T, D]
+                        T, D = shape
+                        chunk = [raw[i*D:(i+1)*D] for i in range(T)]
+
+                smoothness = _action_smoothness(chunk)
+
+                if span:
+                    span.set_attribute("policy.status", "ok")
+                    span.set_attribute("policy.latency_ms", latency_ms)
+                    span.set_attribute("policy.chunk_size", len(chunk))
+                    span.set_attribute("policy.smoothness", smoothness)
+                    span.set_attribute("policy.has_action", bool(chunk))
+
+                return {
+                    "status": "ok",
+                    "action_chunk": chunk,
+                    "chunk_size": len(chunk),
+                    "smoothness": smoothness,
+                    "domain_name": "bridge_orig_lerobot",
+                    "latency_ms": latency_ms,
+                    "has_frame": True,
+                }
+
+            except Exception as e:
+                elapsed = round((time.monotonic() - t0) * 1000, 1)
+                if span:
+                    span.set_attribute("policy.status", "error")
+                    span.set_attribute("policy.error", str(e)[:200])
+                    span.set_attribute("policy.latency_ms", elapsed)
+                # Fall back to action pool on error
+                pool = load_action_pool()
+                entry = pool.get(scene_name, {})
+                fallback_chunk = entry.get("good", [])
+                return {
+                    "status": "fallback",
+                    "error": str(e)[:200],
+                    "action_chunk": fallback_chunk,
+                    "chunk_size": len(fallback_chunk),
+                    "smoothness": _action_smoothness(fallback_chunk),
+                    "domain_name": entry.get("domain_name", "umi"),
+                    "latency_ms": elapsed,
+                    "has_frame": frame_path.exists(),
+                }
+
+    # ---- Episode runner ------------------------------------------------------
+
     def run_episode() -> dict:
-        episode_id   = str(uuid.uuid4())[:12]
-        scene_name   = random.choice(list(SCENES.keys()))
-        scene_desc   = SCENES[scene_name]
+        episode_id     = str(uuid.uuid4())[:12]
+        scene_name     = random.choice(list(SCENES.keys()))
+        scene_prompt   = SCENES[scene_name]
         inject_failure = random.random() < FAILURE_RATE
-        budget_s     = 1.0 / TICK_HZ
-        action_pool  = load_action_pool()
-        frame_b64    = load_frame_b64(scene_name)
-        ticks        = []
 
         with maybe_span("episode",
-                        **{"episode.id":       episode_id,
-                           "episode.scene":    scene_name,
-                           "model.version":    MODEL_VERSION,
-                           "episode.has_frame": frame_b64 is not None}) as episode_span:
+                        **{"episode.id": episode_id,
+                           "episode.scene": scene_name,
+                           "model.version": MODEL_VERSION}) as ep_span:
 
-            last_tick_result = None
-            for tick_num in range(TICKS_PER_EPISODE):
-                tick_t0      = time.monotonic()
-                is_last      = tick_num == TICKS_PER_EPISODE - 1
-                fail_this    = inject_failure and is_last
+            # Step 1: Text-to-Image generation
+            t2i_result = call_text_to_image(scene_prompt)
 
-                with maybe_span("control-tick",
-                                **{"tick.number":    tick_num,
-                                   "tick.budget_ms": round(TICK_BUDGET_MS, 1),
-                                   "tick.injected_failure": fail_this}) as tick_span:
-                    if fail_this:
-                        # Injected failure: force 'bad' action selection
-                        pool_entry   = action_pool.get(scene_name, {})
-                        tick_result  = {
-                            "reasoning":       {"valid": False, "injected_failure": True},
-                            "action_selected": "bad",
-                            "action_chunk":    pool_entry.get("bad", []),
-                            "domain_name":     pool_entry.get("domain_name", "umi"),
-                            "chunk_size":      pool_entry.get("action_chunk_size", 16),
-                            "latency_ms":      0.0,
-                            "has_frame":       frame_b64 is not None,
-                        }
-                    else:
-                        tick_result = call_reasoner(
-                            scene_name, scene_desc, frame_b64, action_pool
-                        )
+            # Step 2: Action Policy prediction
+            if inject_failure:
+                # Injected failure: use bad action chunk from pool
+                pool = load_action_pool()
+                entry = pool.get(scene_name, {})
+                policy_result = {
+                    "status": "injected-failure",
+                    "action_chunk": entry.get("bad", []),
+                    "chunk_size": len(entry.get("bad", [])),
+                    "smoothness": _action_smoothness(entry.get("bad", [])),
+                    "domain_name": entry.get("domain_name", "umi"),
+                    "latency_ms": 0,
+                    "has_frame": True,
+                }
+            else:
+                policy_result = call_action_policy(scene_name, scene_prompt)
 
-                    elapsed      = time.monotonic() - tick_t0
-                    within_budget = elapsed <= budget_s
-                    smoothness   = _action_smoothness(tick_result.get("action_chunk", []))
-                    last_tick_result = tick_result
-
-                    if tick_span:
-                        tick_span.set_attribute("tick.elapsed_ms",       round(elapsed * 1000, 1))
-                        tick_span.set_attribute("tick.within_budget",     within_budget)
-                        tick_span.set_attribute("tick.action_selected",   tick_result["action_selected"])
-                        tick_span.set_attribute("tick.action_smoothness", smoothness)
-
-                ticks.append({
-                    "tick":             tick_num,
-                    "scene":            scene_name,
-                    "reasoning":        tick_result["reasoning"],
-                    "action_selected":  tick_result["action_selected"],
-                    "action_chunk":     tick_result["action_chunk"],
-                    "domain_name":      tick_result["domain_name"],
-                    "action_smoothness": smoothness,
-                    "elapsed_s":        round(elapsed, 4),
-                    "within_budget":    within_budget,
-                    "injected_failure": fail_this,
-                    "has_frame":        tick_result["has_frame"],
-                })
-                sleep_remaining = max(0, budget_s - (time.monotonic() - tick_t0))
-                time.sleep(sleep_remaining)
-
-            # Summarise episode quality
-            valid_ticks     = [t for t in ticks if t["reasoning"].get("valid")]
-            avg_confidence  = (
-                round(sum(t["reasoning"].get("confidence", 0) for t in valid_ticks)
-                      / len(valid_ticks), 3)
-                if valid_ticks else 0.0
-            )
-            avg_smoothness  = round(
-                sum(t["action_smoothness"] for t in ticks) / len(ticks), 4
-            )
-            good_selections = sum(1 for t in ticks if t["action_selected"] == "good")
-            has_failure     = any(t["injected_failure"] for t in ticks)
-
-            # Use the final tick's action chunk for the dream step
-            dream_chunk     = last_tick_result["action_chunk"] if last_tick_result else []
-            dream_domain    = last_tick_result["domain_name"]  if last_tick_result else "umi"
+            # Build episode record
+            gen_ok       = t2i_result.get("status") == "ok"
+            policy_ok    = policy_result.get("status") == "ok"
+            smoothness   = policy_result.get("smoothness", 0.0)
+            has_failure  = inject_failure
 
             episode = {
-                "episode_id":       episode_id,
-                "timestamp":        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "scene":            scene_name,
-                "scene_description": scene_desc,
-                "frame_path":       f"{scene_name}.jpg",
-                "ticks":            len(ticks),
-                "avg_confidence":   avg_confidence,
-                "avg_smoothness":   avg_smoothness,
-                "good_selections":  good_selections,
-                "has_failure":      has_failure,
-                "model_version":    MODEL_VERSION,
-                # Action chunk from final tick — passed to Forward Dynamics dream step
-                "dream_action_chunk": dream_chunk,
-                "dream_domain":       dream_domain,
-                "tick_data":        ticks,
+                "episode_id":        episode_id,
+                "timestamp":         time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "scene":             scene_name,
+                "scene_description": scene_prompt,
+                "frame_path":        f"{scene_name}.jpg",
+                "model_version":     MODEL_VERSION,
+                "has_failure":       has_failure,
+                # Generation quality signals
+                "generation": {
+                    "status":       t2i_result.get("status", "error"),
+                    "image_size":   t2i_result.get("image_size_bytes", 0),
+                    "latency_ms":   t2i_result.get("latency_ms", 0),
+                },
+                # Action policy signals
+                "policy": {
+                    "status":       policy_result.get("status", "error"),
+                    "chunk_size":   policy_result.get("chunk_size", 0),
+                    "smoothness":   smoothness,
+                    "domain_name":  policy_result.get("domain_name", ""),
+                    "latency_ms":   policy_result.get("latency_ms", 0),
+                },
+                # Combined quality score (used by curator)
+                "gen_ok":            gen_ok,
+                "policy_ok":         policy_ok,
+                "avg_smoothness":    smoothness,
+                # Action chunk for Forward Dynamics dream step
+                "dream_action_chunk": policy_result.get("action_chunk", []),
+                "dream_domain":       policy_result.get("domain_name", "umi"),
             }
 
-            if episode_span:
-                episode_span.set_attribute("episode.ticks",           len(ticks))
-                episode_span.set_attribute("episode.avg_confidence",   avg_confidence)
-                episode_span.set_attribute("episode.avg_smoothness",   avg_smoothness)
-                episode_span.set_attribute("episode.good_selections",  good_selections)
-                episode_span.set_attribute("episode.has_failure",      has_failure)
+            if ep_span:
+                ep_span.set_attribute("episode.gen_ok", gen_ok)
+                ep_span.set_attribute("episode.policy_ok", policy_ok)
+                ep_span.set_attribute("episode.smoothness", smoothness)
+                ep_span.set_attribute("episode.has_failure", has_failure)
 
         EPISODE_DIR.mkdir(parents=True, exist_ok=True)
         path = EPISODE_DIR / f"{episode_id}.json"
         path.write_text(json.dumps(episode, indent=2))
         print(
             f"[robot-sim] Episode {episode_id}: scene={scene_name} "
-            f"confidence={avg_confidence:.2f} smoothness={avg_smoothness:.4f} "
-            f"good_selections={good_selections}/{len(ticks)} failure={has_failure}",
+            f"gen={'ok' if gen_ok else 'FAIL'} "
+            f"policy={'ok' if policy_ok else policy_result.get('status','')} "
+            f"smoothness={smoothness:.4f} failure={has_failure}",
             flush=True,
         )
         return episode
 
     if __name__ == "__main__":
         print(
-            f"[robot-sim] Starting — embodied-reasoning mode\n"
-            f"  TICK_HZ={TICK_HZ} TICKS_PER_EPISODE={TICKS_PER_EPISODE} "
-            f"FAILURE_RATE={FAILURE_RATE:.0%} MODEL_VERSION={MODEL_VERSION}\n"
+            f"[robot-sim] Starting -- Generator-native mode (D031/Option E)\n"
+            f"  vllm_url={VLLM_URL}\n"
+            f"  episodes_per_cycle={EPISODES_PER_CYCLE} failure_rate={FAILURE_RATE:.0%}\n"
+            f"  model_version={MODEL_VERSION}\n"
             f"  frames_dir={FRAMES_DIR} action_pool={ACTION_POOL_FILE}",
             flush=True,
         )
-        cooldown = float(os.environ.get("EPISODE_COOLDOWN_S", "10"))
         while True:
             try:
                 run_episode()
             except Exception as e:
                 print(f"[robot-sim] Episode failed: {e}", flush=True)
-            time.sleep(cooldown)
+            time.sleep(COOLDOWN_S)
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -428,28 +433,22 @@ spec:
             - sh
             - -c
             - |
-              pip install -q requests opentelemetry-api opentelemetry-sdk \
-                opentelemetry-exporter-otlp-proto-http pillow && \
+              pip install -q opentelemetry-api opentelemetry-sdk \
+                opentelemetry-exporter-otlp-proto-http && \
               python /app/robot_sim.py
           env:
             - name: VLLM_URL
               value: "http://cosmos3-edge.vllm.svc:8000"
-            - name: TICK_HZ
-              value: "1"
-            - name: TICKS_PER_EPISODE
+            - name: EPISODES_PER_CYCLE
               value: "5"
             - name: FAILURE_RATE
               value: "0.3"
             - name: EPISODE_COOLDOWN_S
-              value: "10"
+              value: "15"
             - name: MODEL_VERSION
               value: "cosmos3-edge-v1"
-            # FRAMES_DIR: BridgeData2 first-frames mounted from hostPath.
-            # See assets/bridgedata2/ATTRIBUTION.md for provenance.
             - name: FRAMES_DIR
               value: "/data/frames"
-            # ACTION_POOL_FILE: real DROID/UMI action chunks (from NVIDIA example data).
-            # See assets/bridgedata2/action_pool.json.
             - name: ACTION_POOL_FILE
               value: "/data/action_pool.json"
             - name: NODE_IP
@@ -464,9 +463,6 @@ spec:
               readOnly: true
             - name: episodes
               mountPath: /data/episodes
-            # BridgeData2 frames + action pool delivered via hostPath.
-            # Populated by the OS image (baked into derived-image) or a
-            # one-time scp/bootstrap step documented in DEPLOYMENT_GUIDE.md.
             - name: frames
               mountPath: /data/frames
               readOnly: true

@@ -472,3 +472,31 @@ Five first-frames extracted from `nvidia/BridgeData2-Subset-Synthetic-Captions` 
 **Files changed:** `DECISIONS.md` (this entry), `assets/bridgedata2/ATTRIBUTION.md` (new), `assets/bridgedata2/frames/` (5 first-frames, new).
 
 **Files changed:** none in-repo — both the auth.json fix and the bootc retry are live device-only changes, matching D018/D019/D024's precedent that Thor's manually-configured, non-GitOps credential files aren't tracked in this repo. `DECISIONS.md` (this entry) is the only artifact.
+
+## D031: Generator-native flywheel (Option E) -- vLLM-Omni is Generator-only, Reasoner text output is structurally impossible
+
+**Date:** 2026-08-13
+**Supersedes:** D030-A (Reasoner SFT) for the fine-tuning approach; D030-B/C (Forward Dynamics centerpiece, ii-b action selection) are preserved unchanged.
+
+**Finding:** Source-code analysis of `vllm_omni/diffusion/models/cosmos3/pipeline_cosmos3.py` (the `Cosmos3OmniDiffusersPipeline` class loaded by `vllm serve --omni`) confirmed that vLLM-Omni is a **Generator-only pipeline**:
+
+1. The `lm_head` (the layer that converts hidden states into text tokens) is **explicitly discarded** during weight loading: `if k.startswith("lm_head."): return None`. Without an lm_head, text generation is structurally impossible.
+2. The "Understanding" (UND) pathway is internal conditioning only -- it encodes the text prompt into K/V cache for the Generator's cross-attention. It never emits text to the user.
+3. `modalities=["text"]` is accepted syntactically but silently falls through to video generation.
+4. System prompts are hardcoded to Generator: `"You are a helpful assistant who will generate videos from a give prompt."`
+5. Every `forward()` return is image, video, audio, or action tensors -- never text.
+
+This was confirmed empirically: even a pure text question ("What is 2+2?") sent to `/v1/chat/completions` on Thor's vLLM-Omni returned a base64 PNG image.
+
+Running both Reasoner (standard vLLM) and Generator (vLLM-Omni) simultaneously on Thor's single GPU was investigated and ruled out: CUDA compute contention on Jetson unified memory makes dual-inference unpredictable for live demo latency. Mode-switching (5-min model reload between acts) was rejected as too disruptive.
+
+**Decision (Option E):** The flywheel operates entirely within the Generator's native capabilities:
+- **Text-to-Image** (`POST /v1/images/generations`): robot-sim generates scene images from text prompts. Proves the Generator is alive and producing coherent visual output.
+- **Action Policy** (`POST /v1/videos` with `action_mode: policy`): robot-sim predicts DROID action chunks from BridgeData2 conditioning frames. This is Cosmos3-Edge's core Physical AI capability.
+- **Forward Dynamics** (unchanged from D030-B): dreamer renders rollout videos from conditioning frames + action chunks. The "dream before deploy" centerpiece.
+- **Curation** scores generation quality (image coherence, action smoothness) rather than text reasoning quality.
+- **Training** targets cosmos-framework **Vision SFT** (`launch_sft_vision_edge.sh` recipe) instead of Reasoner SFT, directly improving T2I/I2V/action generation quality.
+
+**What this preserves from D030:** Forward Dynamics as the no-robot centerpiece (D030-B), real BridgeData2 seed frames (D030-E), DROID/UMI action chunks from the pool (D030-C variant), the dream video side-by-side comparison (Gate 2). The flywheel signal shifts from "text reasoning quality" to "generation quality + action trajectory quality" -- which is what the Generator actually does and what Vision SFT actually improves.
+
+**Files changed:** `robot-sim.yaml` (rewritten for Generator-native), `curator.yaml` (Generator quality scoring), `sync-agent.yaml` (updated manifest schema), `DECISIONS.md` (this entry).

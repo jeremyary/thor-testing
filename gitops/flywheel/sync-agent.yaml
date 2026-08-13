@@ -60,19 +60,15 @@ data:
             "curation_score":   episode.get("curation_score", 0),
             "curation_reason":  episode.get("curation_reason", ""),
             "scene":            episode.get("scene", ""),
-            "scene_description": episode.get("scene_description", ""),
             "model_version":    episode.get("model_version", ""),
-            "ticks":            episode.get("ticks", 0),
             "timestamp":        episode.get("timestamp", ""),
-            # Quality signals (D030-A/C): replace latency proxy with reasoning quality
-            "avg_confidence":   episode.get("avg_confidence", 0.0),
+            # Generator quality signals (D031 / Option E)
+            "gen_ok":           episode.get("gen_ok", False),
+            "policy_ok":        episode.get("policy_ok", False),
             "avg_smoothness":   episode.get("avg_smoothness", 0.0),
-            "good_selections":  episode.get("good_selections", 0),
-            # Action chunk reference for hub-side Forward Dynamics dream step (D030-B)
+            # Action chunk reference for Forward Dynamics dream step
             "frame_path":       episode.get("frame_path", ""),
             "dream_domain":     episode.get("dream_domain", "umi"),
-            # Note: dream_action_chunk is in the full episode JSON in S3.
-            # Manifests carry only scalar metadata to keep Kafka message size small.
         }
         producer.send(KAFKA_TOPIC, value=manifest)
         producer.flush()
