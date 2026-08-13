@@ -103,7 +103,7 @@ data:
             log.error(f"DSP API call failed: {e}")
         return False
 
-    def publish_trigger(producer, manifests: list) -> None:
+    def publish_trigger_confluent(producer, manifests: list) -> None:
         event = {
             "event":     "training-trigger",
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -111,49 +111,52 @@ data:
             "episode_ids":   [m.get("episode_id") for m in manifests],
         }
         try:
-            producer.send(TRIGGER_TOPIC, value=json.dumps(event).encode())
-            producer.flush()
-            log.info(f"Published training-trigger event → {TRIGGER_TOPIC}")
+            producer.produce(TRIGGER_TOPIC, value=json.dumps(event).encode())
+            producer.flush(timeout=10)
+            log.info(f"Published training-trigger event -> {TRIGGER_TOPIC}")
         except Exception as e:
             log.warning(f"Failed to publish trigger event: {e}")
 
     def run() -> None:
-        from kafka import KafkaConsumer, KafkaProducer
-
-        # kafka-python-ng 2.2.3 has a bug with Python 3.12: passing ssl_context
-        # fails with "Invalid file object: None" because it tries to read
-        # ssl_context.certfile which is None for server-only auth. Workaround:
-        # pass individual ssl_ params instead of ssl_context.
-        ssl_kwargs = {
-            "security_protocol": "SSL",
-            "ssl_cafile":        KAFKA_CA_FILE,
-            "ssl_check_hostname": False,
-        }
+        from confluent_kafka import Consumer as CConsumer, Producer as CProducer
 
         log.info(f"Connecting to Kafka at {KAFKA_BOOTSTRAP}, topic={EPISODE_TOPIC}, "
                  f"threshold={TRIGGER_THRESHOLD}")
 
-        consumer = KafkaConsumer(
-            EPISODE_TOPIC,
-            bootstrap_servers   = KAFKA_BOOTSTRAP,
-            **ssl_kwargs,
-            group_id            = CONSUMER_GROUP,
-            auto_offset_reset   = "earliest",
-            enable_auto_commit  = True,
-            value_deserializer  = lambda m: json.loads(m.decode("utf-8")),
-            consumer_timeout_ms = -1,   # block indefinitely
-        )
-        producer = KafkaProducer(
-            bootstrap_servers = KAFKA_BOOTSTRAP,
-            **ssl_kwargs,
-        )
+        consumer = CConsumer({
+            "bootstrap.servers":  KAFKA_BOOTSTRAP,
+            "security.protocol":  "SSL",
+            "ssl.ca.location":    KAFKA_CA_FILE,
+            "group.id":           CONSUMER_GROUP,
+            "auto.offset.reset":  "earliest",
+            "enable.auto.commit": True,
+        })
+        consumer.subscribe([EPISODE_TOPIC])
+
+        producer = CProducer({
+            "bootstrap.servers":  KAFKA_BOOTSTRAP,
+            "security.protocol":  "SSL",
+            "ssl.ca.location":    KAFKA_CA_FILE,
+        })
 
         pending    = []
         run_number = 0
 
-        log.info("Consumer ready — waiting for episode manifests")
-        for msg in consumer:
-            manifest = msg.value
+        log.info("Consumer ready -- waiting for episode manifests")
+        while True:
+            msg = consumer.poll(timeout=5.0)
+            if msg is None:
+                continue
+            if msg.error():
+                log.warning(f"Kafka error: {msg.error()}")
+                continue
+
+            try:
+                manifest = json.loads(msg.value().decode("utf-8"))
+            except Exception as e:
+                log.warning(f"Bad message: {e}")
+                continue
+
             episode_id = manifest.get("episode_id", "?")
             score      = manifest.get("curation_score", "?")
             log.info(f"Received episode {episode_id} (score={score}) "
@@ -164,11 +167,11 @@ data:
                 run_number += 1
                 log.info(
                     f"TRIGGER #{run_number}: threshold reached "
-                    f"({len(pending)} curated episodes) — initiating training pipeline"
+                    f"({len(pending)} curated episodes) -- initiating training pipeline"
                 )
-                publish_trigger(producer, pending)
+                publish_trigger_confluent(producer, pending)
                 call_dsp_api(len(pending), pending)
-                pending = []   # reset for next batch
+                pending = []
 
     if __name__ == "__main__":
         while True:
@@ -202,7 +205,7 @@ spec:
           command:
             - sh
             - -c
-            - pip install -q kafka-python-ng && python /app/consumer.py
+            - pip install -q confluent-kafka && python /app/consumer.py
           env:
             - name: KAFKA_BOOTSTRAP
               value: "fleet-kafka-bootstrap.fleet-ops.svc:9093"
