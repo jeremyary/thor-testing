@@ -1,0 +1,1515 @@
+# This project was developed with assistance from AI tools.
+#
+# Physical AI Edge Flywheel Dashboard
+#
+# Display console + control panel + educational overlay running as a MicroShift
+# workload on Thor. Served at http://10.0.0.42:30801.
+#
+# The dashboard itself is a demo beat: it is GitOps-delivered (Argo CD sync),
+# runs on the edge device (not the hub), and needs no terminal during Acts 2-3.
+#
+# Controls:  Start/Stop Flywheel, Dream v1/v2, Stop Dreamer, Clear Data
+# Display:   Live scene frame, Reasoner output, curation log (scrolling tail),
+#            Forward Dynamics dream video comparison (the Act 3 money shot),
+#            flywheel progress bar, model version indicator
+# Education: Contextual annotations explaining each panel; toggleable for
+#            repeat audiences
+#
+# Auth posture: none (matches PoC-wide unauthenticated posture, D028).
+# RBAC: dashboard SA has Deployment patch in flywheel namespace + Service read
+#       in vllm namespace (to detect active color/model version).
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dashboard-code
+  namespace: flywheel
+data:
+  dashboard.py: |
+    #!/usr/bin/env python3
+    """Physical AI Edge Flywheel Dashboard -- Flask backend."""
+    import json, os, pathlib, queue, shutil, threading, time
+    from typing import Optional
+    from flask import Flask, Response, jsonify, request, send_file
+
+    try:
+        from kubernetes import client as k8s, config as k8scfg
+        try:
+            k8scfg.load_incluster_config()
+        except Exception:
+            k8scfg.load_kube_config(
+                os.environ.get("KUBECONFIG",
+                    "/var/lib/microshift/resources/kubeadmin/kubeconfig"))
+        K8S = True
+    except Exception:
+        K8S = False
+
+    app = Flask(__name__)
+
+    # ---- Paths ---------------------------------------------------------------
+    DATA          = pathlib.Path("/data")
+    EP_RAW        = DATA / "episodes" / "raw"
+    EP_CUR        = DATA / "episodes" / "curated"
+    EP_REJ        = DATA / "episodes" / "rejected"
+    EP_SENT       = DATA / "episodes" / "sent"
+    DREAMS        = DATA / "dreams"
+    FRAMES        = pathlib.Path(os.environ.get("FRAMES_DIR", "/data/frames"))
+    HTML_FILE     = pathlib.Path(os.environ.get("HTML_FILE",  "/app/index.html"))
+    FW_NS         = os.environ.get("FLYWHEEL_NS", "flywheel")
+    VLLM_NS       = os.environ.get("VLLM_NS",     "vllm")
+    THRESHOLD     = int(os.environ.get("TRIGGER_THRESHOLD", "10"))
+
+    # ---- K8s helpers ---------------------------------------------------------
+    def _apps() -> Optional["k8s.AppsV1Api"]:
+        return k8s.AppsV1Api() if K8S else None
+
+    def _core() -> Optional["k8s.CoreV1Api"]:
+        return k8s.CoreV1Api() if K8S else None
+
+    def get_replicas(ns: str, name: str) -> int:
+        api = _apps()
+        if not api:
+            return -1
+        try:
+            return api.read_namespaced_deployment(name, ns).spec.replicas or 0
+        except Exception:
+            return -1
+
+    def set_replicas(ns: str, name: str, n: int) -> bool:
+        api = _apps()
+        if not api:
+            return False
+        try:
+            api.patch_namespaced_deployment_scale(
+                name, ns, {"spec": {"replicas": n}})
+            return True
+        except Exception as e:
+            app.logger.error(f"scale {ns}/{name} -> {n}: {e}")
+            return False
+
+    def set_env_var(ns: str, name: str, key: str, value: str) -> bool:
+        api = _apps()
+        if not api:
+            return False
+        try:
+            d = api.read_namespaced_deployment(name, ns)
+            for c in d.spec.template.spec.containers:
+                found = False
+                if c.env:
+                    for ev in c.env:
+                        if ev.name == key:
+                            ev.value = value
+                            found = True
+                            break
+                if not found:
+                    if not c.env:
+                        c.env = []
+                    c.env.append(k8s.V1EnvVar(name=key, value=value))
+            api.patch_namespaced_deployment(name, ns, d)
+            return True
+        except Exception as e:
+            app.logger.error(f"set_env {ns}/{name} {key}={value}: {e}")
+            return False
+
+    def get_model_version() -> str:
+        """blue selector = v1, green = v2."""
+        api = _core()
+        if not api:
+            return "cosmos3-edge-v1"
+        try:
+            svc = api.read_namespaced_service("cosmos3-edge", VLLM_NS)
+            color = (svc.spec.selector or {}).get("color", "blue")
+            return "cosmos3-edge-v2" if color == "green" else "cosmos3-edge-v1"
+        except Exception:
+            return "cosmos3-edge-v1"
+
+    # ---- Episode helpers -----------------------------------------------------
+    def _jsons(d: pathlib.Path) -> list[pathlib.Path]:
+        return list(d.glob("*.json")) if d.exists() else []
+
+    def _count(d: pathlib.Path) -> int:
+        return len(_jsons(d))
+
+    def _latest_episode() -> Optional[dict]:
+        candidates = [(p, "pass") for p in _jsons(EP_CUR)] + \
+                     [(p, "reject") for p in _jsons(EP_REJ)]
+        if not candidates:
+            return None
+        p, _ = max(candidates, key=lambda x: x[0].stat().st_mtime)
+        try:
+            ep = json.loads(p.read_text())
+            ep["_verdict"] = "pass" if p.parent == EP_CUR else "reject"
+            return ep
+        except Exception:
+            return None
+
+    def _episode_log(n: int = 30) -> list[dict]:
+        rows = []
+        for p in _jsons(EP_CUR):
+            try:
+                ep = json.loads(p.read_text())
+                ep["_mtime"]   = p.stat().st_mtime
+                ep["_verdict"] = "pass"
+                rows.append(ep)
+            except Exception:
+                pass
+        for p in _jsons(EP_REJ):
+            try:
+                ep = json.loads(p.read_text())
+                ep["_mtime"]   = p.stat().st_mtime
+                ep["_verdict"] = "reject"
+                rows.append(ep)
+            except Exception:
+                pass
+        rows.sort(key=lambda e: e["_mtime"], reverse=True)
+        return rows[:n]
+
+    def _dreams() -> dict:
+        if not DREAMS.exists():
+            return {"v1": None, "v2": None}
+        mp4s = list(DREAMS.glob("*.mp4"))
+        v1 = sorted(f.name for f in mp4s if "-cosmos3-edge-v1.mp4" in f.name)
+        v2 = sorted(f.name for f in mp4s if "-cosmos3-edge-v2.mp4" in f.name)
+        return {"v1": v1[-1] if v1 else None, "v2": v2[-1] if v2 else None}
+
+    def status_snapshot() -> dict:
+        ep     = _latest_episode()
+        sent   = _count(EP_SENT)
+        curated = _count(EP_CUR)
+        mv     = get_model_version()
+        d      = _dreams()
+
+        # Extract latest valid reasoning from episode
+        reasoning = scene = frame = curation_score = curation_reason = curation_verdict = None
+        if ep:
+            scene            = ep.get("scene")
+            frame            = ep.get("frame_path")
+            curation_score   = ep.get("curation_score")
+            curation_reason  = ep.get("curation_reason", "")
+            curation_verdict = ep.get("curation_verdict") or ep.get("_verdict")
+            for tick in reversed(ep.get("tick_data", [])):
+                r = tick.get("reasoning", {})
+                if r.get("valid"):
+                    reasoning = {
+                        "action_strategy": r.get("action_strategy", ""),
+                        "confidence":      round(float(r.get("confidence", 0)), 3),
+                        "select_action":   r.get("select_action", "good"),
+                        "reasoning_text":  r.get("reasoning", ""),
+                        "smoothness":      round(float(tick.get("action_smoothness", 0)), 4),
+                    }
+                    break
+
+        return {
+            "counts": {
+                "raw":      _count(EP_RAW),
+                "curated":  curated,
+                "rejected": _count(EP_REJ),
+                "sent":     sent,
+            },
+            "trigger": {
+                "threshold": THRESHOLD,
+                "progress":  min(sent, THRESHOLD),
+                "pct":       min(100, round(sent / THRESHOLD * 100)),
+                "triggered": sent >= THRESHOLD,
+            },
+            "flywheel_running": get_replicas(FW_NS, "robot-sim") > 0,
+            "dreamer_running":  get_replicas(FW_NS, "dreamer")   > 0,
+            "model_version":    mv,
+            "promoted":         mv == "cosmos3-edge-v2",
+            "latest": {
+                "scene":            scene,
+                "frame":            frame,
+                "reasoning":        reasoning,
+                "curation_score":   curation_score,
+                "curation_reason":  curation_reason,
+                "curation_verdict": curation_verdict,
+            },
+            "dreams": d,
+            "ts": time.time(),
+        }
+
+    # ---- SSE -----------------------------------------------------------------
+    _sse_queues: list[queue.SimpleQueue] = []
+    _sse_lock   = threading.Lock()
+
+    def broadcast(event: str, data: dict):
+        msg = f"event: {event}\ndata: {json.dumps(data)}\n\n"
+        with _sse_lock:
+            dead = []
+            for q in _sse_queues:
+                try:
+                    q.put_nowait(msg)
+                except Exception:
+                    dead.append(q)
+            for q in dead:
+                if q in _sse_queues:
+                    _sse_queues.remove(q)
+
+    def _watcher():
+        seen_ep    : set[str] = set()
+        seen_dreams: set[str] = set()
+        last_status = 0.0
+        while True:
+            time.sleep(1)
+            now = time.time()
+            for d, verdict in [(EP_CUR, "pass"), (EP_REJ, "reject")]:
+                for p in _jsons(d):
+                    if p.name not in seen_ep:
+                        seen_ep.add(p.name)
+                        try:
+                            ep = json.loads(p.read_text())
+                            broadcast("episode", {
+                                "episode_id":      ep.get("episode_id", p.stem),
+                                "verdict":         verdict,
+                                "curation_score":  ep.get("curation_score", 0),
+                                "curation_reason": ep.get("curation_reason", ""),
+                                "scene":           ep.get("scene", ""),
+                                "model_version":   ep.get("model_version", ""),
+                                "ts": now,
+                            })
+                        except Exception:
+                            pass
+            if DREAMS.exists():
+                for p in DREAMS.glob("*.mp4"):
+                    if p.name not in seen_dreams:
+                        seen_dreams.add(p.name)
+                        ver = "v2" if "-cosmos3-edge-v2.mp4" in p.name else "v1"
+                        broadcast("dream", {"file": p.name, "version": ver, "ts": now})
+            if now - last_status >= 3:
+                last_status = now
+                try:
+                    broadcast("status", status_snapshot())
+                except Exception:
+                    pass
+
+    threading.Thread(target=_watcher, daemon=True).start()
+
+    # ---- Routes --------------------------------------------------------------
+    @app.route("/")
+    def index():
+        html = HTML_FILE.read_text() if HTML_FILE.exists() else "<h1>index.html not mounted</h1>"
+        return Response(html, mimetype="text/html")
+
+    @app.route("/api/events")
+    def sse():
+        q: queue.SimpleQueue = queue.SimpleQueue()
+        with _sse_lock:
+            _sse_queues.append(q)
+        q.put_nowait(f"event: status\ndata: {json.dumps(status_snapshot())}\n\n")
+        initial_log = _episode_log(30)
+        q.put_nowait(f"event: log_init\ndata: {json.dumps(initial_log)}\n\n")
+        def generate():
+            try:
+                while True:
+                    try:
+                        yield q.get(timeout=20)
+                    except queue.Empty:
+                        yield ": keepalive\n\n"
+            finally:
+                with _sse_lock:
+                    if q in _sse_queues:
+                        _sse_queues.remove(q)
+        return Response(generate(), mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache",
+                                 "X-Accel-Buffering": "no"})
+
+    @app.route("/api/status")
+    def api_status():
+        return jsonify(status_snapshot())
+
+    @app.route("/api/frame/<path:name>")
+    def serve_frame(name):
+        p = FRAMES / name
+        if not p.exists():
+            return ("not found", 404)
+        return send_file(p, mimetype="image/jpeg")
+
+    @app.route("/api/dream/<path:name>")
+    def serve_dream(name):
+        p = DREAMS / name
+        if not p.exists():
+            return ("not found", 404)
+        return send_file(p, mimetype="video/mp4", conditional=True)
+
+    @app.route("/api/control/flywheel", methods=["POST"])
+    def ctrl_flywheel():
+        action   = (request.json or {}).get("action", "start")
+        replicas = 1 if action == "start" else 0
+        ok = all(set_replicas(FW_NS, d, replicas)
+                 for d in ["robot-sim", "curator", "sync-agent"])
+        time.sleep(1)
+        broadcast("status", status_snapshot())
+        return jsonify({"ok": ok, "action": action})
+
+    @app.route("/api/control/dreamer", methods=["POST"])
+    def ctrl_dreamer():
+        data    = request.json or {}
+        action  = data.get("action", "start")
+        mv      = data.get("model_version", "cosmos3-edge-v1")
+        ok = True
+        if action == "start":
+            ok = ok and set_env_var(FW_NS, "dreamer", "MODEL_VERSION", mv)
+            ok = ok and set_replicas(FW_NS, "dreamer", 1)
+        else:
+            ok = set_replicas(FW_NS, "dreamer", 0)
+        time.sleep(1)
+        broadcast("status", status_snapshot())
+        return jsonify({"ok": ok, "action": action, "model_version": mv})
+
+    @app.route("/api/control/clear", methods=["POST"])
+    def ctrl_clear():
+        cleared = 0
+        for d in (EP_RAW, EP_CUR, EP_REJ, EP_SENT):
+            if d.exists():
+                for p in d.glob("*.json"):
+                    try:
+                        p.unlink()
+                        cleared += 1
+                    except Exception:
+                        pass
+        broadcast("status", status_snapshot())
+        return jsonify({"ok": True, "cleared": cleared})
+
+    if __name__ == "__main__":
+        app.run(host="0.0.0.0", port=8080, threaded=True)
+
+  index.html: |
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Physical AI Edge Flywheel — Thor</title>
+    <style>
+    :root {
+      --bg:        #0e1014;
+      --card:      #16191f;
+      --card2:     #1e2229;
+      --border:    #2a2f3a;
+      --border2:   #353c4a;
+      --txt:       #dde1ea;
+      --txt2:      #7a8298;
+      --txt3:      #4a5168;
+      --green:     #22d3a5;
+      --green-dim: #1a9e7d;
+      --red:       #f04545;
+      --red-dim:   #7a2020;
+      --blue:      #4a9eff;
+      --blue-dim:  #1a4a8a;
+      --orange:    #f0983a;
+      --rh-red:    #ee0000;
+      --gold:      #d4a017;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--txt);
+      font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+      font-size: 13px;
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+
+    /* ---- Header --------------------------------------------------------- */
+    #header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 20px;
+      background: var(--card);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    #header-left { display: flex; align-items: center; gap: 12px; }
+    #logo {
+      width: 28px; height: 28px;
+      background: var(--rh-red);
+      border-radius: 4px;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 900; font-size: 14px; color: #fff; flex-shrink: 0;
+    }
+    #title-block h1 { font-size: 15px; font-weight: 600; letter-spacing: -0.2px; }
+    #title-block p  { font-size: 11px; color: var(--txt2); }
+    #model-badge {
+      display: flex; align-items: center; gap: 6px;
+      padding: 5px 12px;
+      border-radius: 20px;
+      font-size: 12px; font-weight: 600;
+      border: 1px solid var(--border2);
+      background: var(--card2);
+      transition: all 0.4s ease;
+    }
+    #model-badge.v1 { border-color: var(--blue-dim); }
+    #model-badge.v2 { border-color: var(--green-dim); background: #0e2520; }
+    #model-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--blue);
+      transition: background 0.4s ease;
+      box-shadow: 0 0 6px currentColor;
+    }
+    #model-badge.v2 #model-dot { background: var(--green); }
+
+    /* ---- Controls ------------------------------------------------------- */
+    #controls { display: flex; align-items: center; gap: 8px; }
+    .btn {
+      padding: 6px 14px; border-radius: 6px; border: 1px solid transparent;
+      font-size: 12px; font-weight: 500; cursor: pointer;
+      transition: all 0.15s ease; white-space: nowrap;
+      display: flex; align-items: center; gap: 5px;
+    }
+    .btn-green  { background: #0e2e20; border-color: var(--green-dim); color: var(--green); }
+    .btn-green:hover { background: #143d2a; border-color: var(--green); }
+    .btn-red    { background: #2e1010; border-color: #7a2a2a; color: var(--red); }
+    .btn-red:hover { background: #3a1414; border-color: var(--red); }
+    .btn-blue   { background: #0e1e3a; border-color: var(--blue-dim); color: var(--blue); }
+    .btn-blue:hover { background: #122850; border-color: var(--blue); }
+    .btn-gold   { background: #2a1e08; border-color: #7a5a14; color: var(--gold); }
+    .btn-gold:hover { background: #382808; border-color: var(--gold); }
+    .btn-gray   { background: var(--card2); border-color: var(--border); color: var(--txt2); }
+    .btn-gray:hover { border-color: var(--border2); color: var(--txt); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-sm { padding: 4px 10px; font-size: 11px; }
+    .dot-pulse {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: currentColor;
+      animation: pulse 1.6s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.3; }
+    }
+    .hidden { display: none !important; }
+
+    /* ---- Main grid ------------------------------------------------------ */
+    #main {
+      display: grid;
+      grid-template-columns: 220px 1fr;
+      grid-template-rows: auto auto 1fr auto;
+      gap: 12px;
+      padding: 14px 16px;
+      max-width: 1400px;
+    }
+
+    /* ---- Cards ---------------------------------------------------------- */
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .card-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      background: var(--card2);
+    }
+    .card-title {
+      font-size: 10px; font-weight: 700; letter-spacing: 0.8px;
+      text-transform: uppercase; color: var(--txt2);
+    }
+    .card-body { padding: 14px; }
+
+    /* ---- Scene panel ---------------------------------------------------- */
+    #scene-card { grid-column: 1; grid-row: 1; }
+    #scene-img-wrap {
+      width: 100%; aspect-ratio: 1;
+      background: #0a0c10;
+      border-radius: 4px;
+      overflow: hidden;
+      position: relative;
+      margin-bottom: 10px;
+    }
+    #scene-img {
+      width: 100%; height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    #scene-img-placeholder {
+      width: 100%; height: 100%;
+      display: flex; align-items: center; justify-content: center;
+      color: var(--txt3); font-size: 11px;
+    }
+    #scene-name {
+      font-size: 13px; font-weight: 600;
+      margin-bottom: 4px;
+    }
+    .annotation {
+      font-size: 10px; color: var(--txt3);
+      line-height: 1.4;
+    }
+
+    /* ---- Reasoner panel ------------------------------------------------- */
+    #reasoner-card { grid-column: 2; grid-row: 1; }
+    .r-field {
+      display: grid;
+      grid-template-columns: 130px 1fr;
+      gap: 6px;
+      padding: 7px 0;
+      border-bottom: 1px solid var(--border);
+      align-items: start;
+    }
+    .r-field:last-child { border-bottom: none; }
+    .r-label { font-size: 11px; color: var(--txt2); padding-top: 1px; }
+    .r-value { font-size: 12px; font-weight: 500; word-break: break-word; }
+    .r-reasoning-text {
+      font-size: 11px; color: var(--txt2);
+      font-style: italic;
+      line-height: 1.5;
+    }
+
+    /* Confidence bar */
+    .conf-bar-wrap { display: flex; align-items: center; gap: 8px; }
+    .conf-bar {
+      flex: 1; height: 6px;
+      background: var(--border);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .conf-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--blue), var(--green));
+      border-radius: 3px;
+      transition: width 0.4s ease;
+    }
+    .conf-num { font-size: 11px; color: var(--txt2); width: 30px; text-align: right; }
+
+    /* Smoothness dot */
+    .smooth-pill {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 2px 8px; border-radius: 10px;
+      font-size: 11px;
+    }
+    .smooth-good { background: #0e2520; color: var(--green); }
+    .smooth-warn { background: #2a1e08; color: var(--gold);  }
+    .smooth-bad  { background: #2e1010; color: var(--red);   }
+
+    /* Select action badge */
+    .sel-badge {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 2px 9px; border-radius: 10px;
+      font-size: 11px; font-weight: 600;
+    }
+    .sel-good { background: #0e2520; color: var(--green); border: 1px solid var(--green-dim); }
+    .sel-bad  { background: #2e1010; color: var(--red);   border: 1px solid var(--red-dim);   }
+
+    /* ---- Flywheel progress ---------------------------------------------- */
+    #progress-card { grid-column: 1 / -1; grid-row: 2; }
+    #progress-inner { display: flex; align-items: center; gap: 16px; padding: 12px 14px; }
+    #prog-bar-wrap { flex: 1; }
+    #prog-track {
+      height: 10px;
+      background: var(--border);
+      border-radius: 5px;
+      overflow: hidden;
+      margin-bottom: 6px;
+    }
+    #prog-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--blue), var(--green));
+      border-radius: 5px;
+      transition: width 0.6s ease;
+      position: relative;
+    }
+    #prog-fill.triggered::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.15), transparent);
+      animation: shimmer 1.5s ease infinite;
+    }
+    @keyframes shimmer {
+      0% { transform: translateX(-100%); }
+      100% { transform: translateX(100%); }
+    }
+    #prog-label {
+      font-size: 11px; color: var(--txt2);
+      display: flex; justify-content: space-between;
+    }
+    #prog-counts { font-size: 12px; color: var(--txt2); white-space: nowrap; }
+    #trigger-banner {
+      padding: 6px 14px;
+      background: linear-gradient(90deg, #0e2520, #0e2520 60%, transparent);
+      border-top: 1px solid var(--green-dim);
+      font-size: 11px; color: var(--green);
+      display: none;
+    }
+    #trigger-banner.show { display: block; }
+
+    /* ---- Dream comparison (HERO) ---------------------------------------- */
+    #dream-card { grid-column: 1 / -1; grid-row: 3; }
+    #dream-body { padding: 14px; }
+    #dream-annotation {
+      font-size: 11px; color: var(--txt3);
+      margin-bottom: 14px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--border);
+    }
+    #dream-videos {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    .dream-panel {}
+    .dream-video-wrap {
+      aspect-ratio: 16/9;
+      background: #080a0c;
+      border-radius: 6px;
+      overflow: hidden;
+      position: relative;
+      border: 1px solid var(--border);
+      margin-bottom: 10px;
+    }
+    .dream-video-wrap.has-video {
+      border-color: var(--border2);
+    }
+    .dream-video-wrap.v2.has-video {
+      border-color: var(--green-dim);
+      box-shadow: 0 0 20px rgba(34,211,165,0.1);
+    }
+    .dream-video {
+      width: 100%; height: 100%;
+      object-fit: cover;
+      display: none;
+    }
+    .dream-video.loaded { display: block; }
+    .dream-placeholder {
+      position: absolute; inset: 0;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 8px;
+      color: var(--txt3);
+    }
+    .dream-placeholder .icon { font-size: 28px; }
+    .dream-placeholder .label { font-size: 11px; line-height: 1.5; text-align: center; }
+    .dream-placeholder.hidden { display: none; }
+    .dream-meta {
+      display: flex; align-items: center; justify-content: space-between;
+      flex-wrap: wrap; gap: 6px;
+    }
+    .dream-version-label { font-size: 12px; font-weight: 600; }
+    .dream-version-label.v1 { color: var(--blue); }
+    .dream-version-label.v2 { color: var(--green); }
+    .dream-controls { display: flex; gap: 6px; }
+    .dream-smoothness { font-size: 11px; color: var(--txt2); }
+
+    /* ---- Curation log --------------------------------------------------- */
+    #log-card { grid-column: 1 / -1; grid-row: 4; }
+    #log-header-extra { display: flex; gap: 8px; align-items: center; }
+    #log-body {
+      height: 240px;
+      overflow-y: auto;
+      scroll-behavior: smooth;
+    }
+    #log-body::-webkit-scrollbar { width: 4px; }
+    #log-body::-webkit-scrollbar-track { background: transparent; }
+    #log-body::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+    .log-entry {
+      border-bottom: 1px solid var(--border);
+      padding: 7px 14px;
+      animation: fadeIn 0.3s ease;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-4px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .log-entry.pass  { border-left: 3px solid var(--green-dim); }
+    .log-entry.reject{ border-left: 3px solid var(--red-dim); }
+    .log-main {
+      display: grid;
+      grid-template-columns: 60px 70px 82px 80px 1fr;
+      gap: 8px; align-items: baseline;
+      font-size: 11px;
+    }
+    .log-time  { color: var(--txt3); font-size: 10px; font-variant-numeric: tabular-nums; }
+    .log-verdict { font-weight: 700; font-size: 11px; }
+    .log-verdict.pass   { color: var(--green); }
+    .log-verdict.reject { color: var(--red); }
+    .log-id    { font-family: monospace; font-size: 10px; color: var(--txt2); }
+    .log-score { font-size: 11px; }
+    .score-good { color: var(--green); }
+    .score-mid  { color: var(--gold); }
+    .score-bad  { color: var(--red); }
+    .log-scene  { color: var(--txt2); }
+    .log-reason {
+      font-size: 10px; color: var(--txt3);
+      padding: 3px 0 1px 0;
+      line-height: 1.4;
+      display: none;
+    }
+    .log-reason.show { display: block; }
+    #log-empty {
+      padding: 40px 14px;
+      text-align: center;
+      color: var(--txt3);
+      font-size: 12px;
+    }
+
+    /* ---- Status bar at bottom ------------------------------------------- */
+    #statusbar {
+      grid-column: 1 / -1;
+      display: flex; align-items: center; gap: 16px;
+      padding: 8px 14px;
+      background: var(--card2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: 10px;
+      color: var(--txt3);
+    }
+    .sb-item { display: flex; gap: 4px; align-items: center; }
+    .sb-label { color: var(--txt3); }
+    .sb-val   { color: var(--txt2); font-weight: 500; }
+    .sb-sep { color: var(--border2); }
+
+    /* ---- Notification toast --------------------------------------------- */
+    #toast {
+      position: fixed; bottom: 20px; right: 20px;
+      background: var(--card2);
+      border: 1px solid var(--border2);
+      border-radius: 8px;
+      padding: 12px 18px;
+      font-size: 12px;
+      opacity: 0;
+      transform: translateY(10px);
+      transition: all 0.3s ease;
+      z-index: 200;
+      max-width: 320px;
+    }
+    #toast.show { opacity: 1; transform: translateY(0); }
+    #toast.toast-green { border-color: var(--green-dim); color: var(--green); }
+    #toast.toast-blue  { border-color: var(--blue-dim);  color: var(--blue);  }
+    #toast.toast-gold  { border-color: #7a5a14;          color: var(--gold);  }
+
+    /* ---- Misc ----------------------------------------------------------- */
+    .tag {
+      display: inline-block;
+      padding: 1px 6px; border-radius: 3px;
+      font-size: 10px;
+      background: var(--card2); border: 1px solid var(--border);
+      color: var(--txt2);
+    }
+    .running-indicator {
+      display: flex; align-items: center; gap: 5px;
+      font-size: 10px; color: var(--green);
+    }
+    </style>
+    </head>
+
+    <body>
+
+    <!-- ===================== HEADER ===================== -->
+    <div id="header">
+      <div id="header-left">
+        <div id="logo">RH</div>
+        <div id="title-block">
+          <h1>Physical AI Edge Flywheel</h1>
+          <p>NVIDIA Jetson AGX Thor T5000 &middot; Blackwell &middot; 128 GB</p>
+        </div>
+      </div>
+
+      <div id="model-badge" class="v1">
+        <div id="model-dot"></div>
+        <span id="model-label">cosmos3-edge-v1</span>
+      </div>
+
+      <div id="controls">
+        <div id="flywheel-status" class="hidden running-indicator">
+          <div class="dot-pulse"></div> Flywheel running
+        </div>
+        <button class="btn btn-green" id="btn-start" onclick="controlFlywheel('start')">
+          &#9654; Start Flywheel
+        </button>
+        <button class="btn btn-red hidden" id="btn-stop" onclick="controlFlywheel('stop')">
+          &#9632; Stop Flywheel
+        </button>
+        <button class="btn btn-gray btn-sm" id="btn-clear" onclick="controlClear()">
+          &#10226; Clear Data
+        </button>
+        <button class="btn btn-gray btn-sm" id="btn-ann" onclick="toggleAnnotations()">
+          &#9881; Annotations
+        </button>
+      </div>
+    </div>
+
+    <!-- ===================== MAIN GRID ===================== -->
+    <div id="main">
+
+      <!-- SCENE -->
+      <div class="card" id="scene-card">
+        <div class="card-header">
+          <span class="card-title">Scene / Frame</span>
+          <span id="scene-tag" class="tag">waiting</span>
+        </div>
+        <div class="card-body">
+          <div id="scene-img-wrap">
+            <div id="scene-img-placeholder">
+              <span style="font-size:22px">&#128248;</span><br>
+              awaiting flywheel
+            </div>
+            <img id="scene-img" style="display:none" alt="scene frame">
+          </div>
+          <div id="scene-name" style="color:var(--txt2)">--</div>
+          <div class="annotation" style="margin-top:6px">
+            Real 256&times;256 robot image &mdash; NVIDIA BridgeData2 dataset
+            (WidowX arm, UC Berkeley RAIL). Used as visual conditioning for
+            the Cosmos3-Edge Reasoner and Forward Dynamics dream.
+          </div>
+        </div>
+      </div>
+
+      <!-- REASONER OUTPUT -->
+      <div class="card" id="reasoner-card">
+        <div class="card-header">
+          <span class="card-title">Reasoner Output</span>
+          <span class="annotation" style="font-size:10px">
+            Cosmos3-Edge: image + instruction &rarr; structured action reasoning (D030-A)
+          </span>
+        </div>
+        <div class="card-body" id="reasoner-body">
+          <div id="reasoner-empty" style="color:var(--txt3);font-size:12px;padding:20px 0;text-align:center">
+            Awaiting first episode&hellip;
+          </div>
+          <div id="reasoner-fields" style="display:none">
+            <div class="r-field">
+              <div class="r-label">action_strategy</div>
+              <div class="r-value" id="r-strategy">--</div>
+            </div>
+            <div class="r-field">
+              <div class="r-label">confidence</div>
+              <div class="r-value">
+                <div class="conf-bar-wrap">
+                  <div class="conf-bar"><div class="conf-fill" id="r-conf-fill" style="width:0%"></div></div>
+                  <div class="conf-num" id="r-conf-num">0.00</div>
+                </div>
+              </div>
+            </div>
+            <div class="r-field">
+              <div class="r-label">select_action</div>
+              <div class="r-value" id="r-select">--</div>
+            </div>
+            <div class="r-field">
+              <div class="r-label">smoothness</div>
+              <div class="r-value" id="r-smooth">--</div>
+            </div>
+            <div class="r-field">
+              <div class="r-label">reasoning</div>
+              <div class="r-reasoning-text" id="r-text">--</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- FLYWHEEL PROGRESS -->
+      <div class="card" id="progress-card">
+        <div class="card-header">
+          <span class="card-title">Flywheel Progress</span>
+          <span class="annotation">
+            Curated episodes flow to hub S3 &rarr; Kafka &rarr; training trigger &rarr; Kueue L40S GPU job
+          </span>
+        </div>
+        <div id="progress-inner">
+          <div id="prog-bar-wrap">
+            <div id="prog-track"><div id="prog-fill" style="width:0%"></div></div>
+            <div id="prog-label">
+              <span id="prog-text">0 / 10 curated episodes sent to hub</span>
+              <span id="prog-state" style="color:var(--txt3)">idle</span>
+            </div>
+          </div>
+          <div id="prog-counts" style="color:var(--txt2)">
+            <span id="c-total">0</span> captured &middot;
+            <span id="c-curated" style="color:var(--green)">0</span> curated &middot;
+            <span id="c-rejected" style="color:var(--red)">0</span> rejected &middot;
+            <span id="c-sent">0</span> sent
+          </div>
+        </div>
+        <div id="trigger-banner">
+          &#9889; Training threshold reached &mdash; Kueue queueing Reasoner SFT job on hub L40S &rarr; cosmos-framework training beginning
+        </div>
+      </div>
+
+      <!-- DREAM COMPARISON (HERO) -->
+      <div class="card" id="dream-card">
+        <div class="card-header">
+          <span class="card-title">&#10024; Dream Before Deploy</span>
+          <div id="dream-dreamer-status" class="hidden running-indicator">
+            <div class="dot-pulse"></div> Dreamer running
+          </div>
+        </div>
+        <div id="dream-body">
+          <div id="dream-annotation" class="annotation">
+            Forward Dynamics: real robot image + action trajectory &rarr; predicted arm motion.
+            Rendered on-device (Thor Blackwell GPU, ~2.6 s, real-time at 5 Hz).
+            No pre-rendered video &mdash; the world model computes this from scratch on Thor.
+            Compare v1 and v2 rollouts to see the flywheel&rsquo;s improvement.
+          </div>
+          <div id="dream-videos">
+
+            <!-- V1 DREAM -->
+            <div class="dream-panel">
+              <div class="dream-video-wrap v1" id="dream-wrap-v1">
+                <div class="dream-placeholder" id="dream-ph-v1">
+                  <div class="icon">&#127775;</div>
+                  <div class="label">Generate the v1 dream<br>to see the baseline rollout</div>
+                </div>
+                <video class="dream-video" id="dream-v1" autoplay loop muted playsinline></video>
+              </div>
+              <div class="dream-meta">
+                <div>
+                  <div class="dream-version-label v1">cosmos3-edge-v1</div>
+                  <div class="dream-smoothness" id="dream-smooth-v1">Before fine-tuning</div>
+                </div>
+                <div class="dream-controls">
+                  <button class="btn btn-blue btn-sm" id="btn-dream-v1"
+                          onclick="controlDreamer('start','cosmos3-edge-v1')">
+                    &#127775; Dream v1
+                  </button>
+                  <button class="btn btn-red btn-sm hidden" id="btn-dream-stop"
+                          onclick="controlDreamer('stop')">
+                    &#9632; Stop
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- V2 DREAM -->
+            <div class="dream-panel">
+              <div class="dream-video-wrap v2" id="dream-wrap-v2">
+                <div class="dream-placeholder" id="dream-ph-v2">
+                  <div class="icon" style="color:var(--txt3)">&#10024;</div>
+                  <div class="label" style="color:var(--txt3)">
+                    Merge promotion PR<br>then generate v2 dream<br>to see the improvement
+                  </div>
+                </div>
+                <video class="dream-video" id="dream-v2" autoplay loop muted playsinline></video>
+              </div>
+              <div class="dream-meta">
+                <div>
+                  <div class="dream-version-label v2">cosmos3-edge-v2</div>
+                  <div class="dream-smoothness" id="dream-smooth-v2">After fine-tuning</div>
+                </div>
+                <div class="dream-controls">
+                  <button class="btn btn-gold btn-sm" id="btn-dream-v2"
+                          onclick="controlDreamer('start','cosmos3-edge-v2')">
+                    &#10024; Dream v2
+                  </button>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+      <!-- CURATION LOG -->
+      <div class="card" id="log-card">
+        <div class="card-header">
+          <span class="card-title">Curation Log</span>
+          <div id="log-header-extra">
+            <span id="log-count" class="annotation">0 entries</span>
+            <button class="btn btn-gray btn-sm" id="btn-ann-log" onclick="toggleLogAnnotations()">
+              &#9432; Reasons
+            </button>
+          </div>
+        </div>
+        <div id="log-body">
+          <div id="log-empty">Flywheel not yet started &mdash; episodes will appear here</div>
+        </div>
+      </div>
+
+      <!-- STATUS BAR -->
+      <div id="statusbar">
+        <div class="sb-item">
+          <span class="sb-label">device</span>
+          <span class="sb-val">Thor T5000 &middot; Blackwell</span>
+        </div>
+        <span class="sb-sep">&middot;</span>
+        <div class="sb-item">
+          <span class="sb-label">model</span>
+          <span class="sb-val" id="sb-model">cosmos3-edge-v1</span>
+        </div>
+        <span class="sb-sep">&middot;</span>
+        <div class="sb-item">
+          <span class="sb-label">flywheel</span>
+          <span class="sb-val" id="sb-fw">idle</span>
+        </div>
+        <span class="sb-sep">&middot;</span>
+        <div class="sb-item">
+          <span class="sb-label">NodePort</span>
+          <span class="sb-val">30801</span>
+        </div>
+        <span class="sb-sep">&middot;</span>
+        <div class="sb-item">
+          <span class="sb-label">vLLM</span>
+          <span class="sb-val">:30800</span>
+        </div>
+        <span class="sb-sep">&middot;</span>
+        <div class="sb-item">
+          <span class="sb-label">updated</span>
+          <span class="sb-val" id="sb-ts">--</span>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- TOAST -->
+    <div id="toast"></div>
+
+    <script>
+    // ---- State ---------------------------------------------------------------
+    let annotationsOn   = true;
+    let logAnnotationsOn = false;
+    let autoScroll      = true;
+    let logEntries      = [];
+    const MAX_LOG       = 30;
+
+    // ---- SSE ----------------------------------------------------------------
+    const evtSource = new EventSource('/api/events');
+
+    evtSource.addEventListener('status', e => {
+      const s = JSON.parse(e.data);
+      applyStatus(s);
+    });
+
+    evtSource.addEventListener('episode', e => {
+      const ep = JSON.parse(e.data);
+      prependLogEntry(ep);
+    });
+
+    evtSource.addEventListener('log_init', e => {
+      const eps = JSON.parse(e.data);
+      logEntries = [];
+      document.getElementById('log-body').innerHTML = '';
+      eps.reverse().forEach(ep => {
+        ep.verdict = ep._verdict || ep.verdict || 'pass';
+        prependLogEntry(ep);
+      });
+    });
+
+    evtSource.addEventListener('dream', e => {
+      const d = JSON.parse(e.data);
+      loadDream(d.version, d.file);
+      showToast('Dream ' + d.version + ' complete \u2014 Forward Dynamics rollout ready',
+                d.version === 'v2' ? 'toast-green' : 'toast-blue');
+    });
+
+    evtSource.onerror = () => {
+      document.getElementById('sb-fw').textContent = 'reconnecting...';
+    };
+
+    // ---- Apply status -------------------------------------------------------
+    function applyStatus(s) {
+      // Model version
+      const mv = s.model_version || 'cosmos3-edge-v1';
+      const isV2 = mv === 'cosmos3-edge-v2';
+      document.getElementById('model-label').textContent = mv;
+      document.getElementById('model-badge').className = isV2 ? 'v2' : 'v1';
+      document.getElementById('sb-model').textContent = mv;
+
+      // Flywheel running
+      const fw = s.flywheel_running;
+      document.getElementById('btn-start').classList.toggle('hidden', fw);
+      document.getElementById('btn-stop').classList.toggle('hidden', !fw);
+      document.getElementById('flywheel-status').classList.toggle('hidden', !fw);
+      document.getElementById('sb-fw').textContent = fw ? 'running' : 'idle';
+
+      // Dreamer
+      const dr = s.dreamer_running;
+      document.getElementById('dream-dreamer-status').classList.toggle('hidden', !dr);
+      document.getElementById('btn-dream-stop').classList.toggle('hidden', !dr);
+      document.getElementById('btn-dream-v1').disabled = dr;
+      document.getElementById('btn-dream-v2').disabled = dr;
+
+      // Progress
+      const t = s.trigger;
+      const pct = t.pct || 0;
+      document.getElementById('prog-fill').style.width = pct + '%';
+      document.getElementById('prog-fill').classList.toggle('triggered', t.triggered);
+      document.getElementById('prog-text').textContent =
+        t.progress + ' / ' + t.threshold + ' curated episodes sent to hub';
+      document.getElementById('prog-state').textContent =
+        t.triggered ? 'TRIGGERED' : (fw ? 'collecting' : 'idle');
+      document.getElementById('trigger-banner').classList.toggle('show', t.triggered);
+
+      // Counts
+      const c = s.counts || {};
+      document.getElementById('c-total').textContent   = (c.raw||0)+(c.curated||0)+(c.rejected||0)+(c.sent||0);
+      document.getElementById('c-curated').textContent  = c.curated  || 0;
+      document.getElementById('c-rejected').textContent = c.rejected || 0;
+      document.getElementById('c-sent').textContent     = c.sent     || 0;
+
+      // Latest scene
+      const lat = s.latest || {};
+      if (lat.scene) {
+        const sceneKey = lat.frame || (lat.scene + '.jpg');
+        const img = document.getElementById('scene-img');
+        const ph  = document.getElementById('scene-img-placeholder');
+        img.src = '/api/frame/' + sceneKey + '?t=' + Date.now();
+        img.style.display = 'block';
+        ph.style.display  = 'none';
+        document.getElementById('scene-name').textContent = lat.scene.replace(/_/g,' ');
+        document.getElementById('scene-tag').textContent  = lat.scene;
+      }
+
+      // Reasoner
+      if (lat.reasoning) {
+        const r = lat.reasoning;
+        document.getElementById('reasoner-empty').style.display = 'none';
+        document.getElementById('reasoner-fields').style.display = 'block';
+        document.getElementById('r-strategy').textContent = r.action_strategy || '--';
+        const conf = Math.round((r.confidence||0)*100);
+        document.getElementById('r-conf-fill').style.width = conf + '%';
+        document.getElementById('r-conf-num').textContent  = (r.confidence||0).toFixed(2);
+
+        const selEl = document.getElementById('r-select');
+        const good  = r.select_action === 'good';
+        selEl.innerHTML = `<span class="sel-badge ${good?'sel-good':'sel-bad'}">${good?'&#10003;':'&#10007;'} ${r.select_action||'--'}</span>`;
+
+        const sm  = r.smoothness || 0;
+        const cls = sm < 0.1 ? 'smooth-good' : sm < 0.2 ? 'smooth-warn' : 'smooth-bad';
+        const lbl = sm < 0.1 ? 'plausible' : sm < 0.2 ? 'marginal' : 'jerky';
+        document.getElementById('r-smooth').innerHTML =
+          `<span class="smooth-pill ${cls}">&#9679; ${sm.toFixed(4)} &mdash; ${lbl}</span>`;
+
+        document.getElementById('r-text').textContent = r.reasoning_text || '';
+      }
+
+      // Dreams
+      const dr_st = s.dreams || {};
+      if (dr_st.v1) loadDream('v1', dr_st.v1);
+      if (dr_st.v2) loadDream('v2', dr_st.v2);
+
+      // Timestamp
+      document.getElementById('sb-ts').textContent =
+        new Date().toLocaleTimeString();
+    }
+
+    // ---- Dream loader -------------------------------------------------------
+    const dreamLoaded = {v1: null, v2: null};
+
+    function loadDream(ver, file) {
+      if (dreamLoaded[ver] === file) return;
+      dreamLoaded[ver] = file;
+      const vid  = document.getElementById('dream-' + ver);
+      const ph   = document.getElementById('dream-ph-' + ver);
+      const wrap = document.getElementById('dream-wrap-' + ver);
+      vid.src = '/api/dream/' + file + '?t=' + Date.now();
+      vid.load();
+      vid.onloadeddata = () => {
+        vid.classList.add('loaded');
+        ph.classList.add('hidden');
+        wrap.classList.add('has-video');
+        if (ver === 'v2') {
+          document.getElementById('dream-smooth-v2').textContent = 'Post fine-tuning rollout';
+        }
+      };
+    }
+
+    // ---- Curation log -------------------------------------------------------
+    const logBody = document.getElementById('log-body');
+
+    logBody.addEventListener('scroll', () => {
+      const b = logBody;
+      autoScroll = b.scrollTop + b.clientHeight >= b.scrollHeight - 10;
+    });
+
+    function scoreClass(score) {
+      if (score >= 0.6) return 'score-good';
+      if (score >= 0.3) return 'score-mid';
+      return 'score-bad';
+    }
+
+    function reasonAnnotation(ep) {
+      const verdict = ep.verdict || ep._verdict || 'pass';
+      if (verdict === 'reject') {
+        const r = ep.curation_reason || '';
+        if (r.includes('injected'))
+          return 'Planted bad data \u2014 curator caught it, stays on Thor, never reaches hub';
+        if (r.includes('reasoning'))
+          return 'Model produced invalid JSON \u2014 low-quality reasoning signal, rejected';
+        if (r.includes('jerky') || r.includes('smoothness'))
+          return 'Jerky action trajectory selected \u2014 physically implausible, rejected';
+        return 'Curation score below threshold \u2014 ' + r;
+      }
+      const c = ep.avg_confidence || 0;
+      const s = ep.avg_smoothness || 0;
+      const g = ep.good_selections || 0;
+      const t = ep.ticks || 1;
+      return `Confidence ${c.toFixed(2)}, smoothness ${s.toFixed(3)}, ${g}/${t} good action selections`;
+    }
+
+    function prependLogEntry(ep) {
+      document.getElementById('log-empty').style.display = 'none';
+      const verdict = ep.verdict || ep._verdict || 'pass';
+      const score   = ep.curation_score || 0;
+      const ts      = ep.ts ? new Date(ep.ts * 1000).toLocaleTimeString() : '--';
+
+      const div = document.createElement('div');
+      div.className = 'log-entry ' + verdict;
+      div.innerHTML = `
+        <div class="log-main">
+          <span class="log-time">${ts}</span>
+          <span class="log-verdict ${verdict}">${verdict === 'pass' ? '&#10003; PASS' : '&#10007; REJECT'}</span>
+          <span class="log-id">${(ep.episode_id||'').substring(0,8)}</span>
+          <span class="log-score ${scoreClass(score)}">${score.toFixed(3)}</span>
+          <span class="log-scene">${(ep.scene||'').replace(/_/g,' ')}</span>
+        </div>
+        <div class="log-reason ${logAnnotationsOn ? 'show' : ''}">${reasonAnnotation(ep)}</div>
+      `;
+      div.style.cursor = 'pointer';
+      div.addEventListener('click', () => {
+        div.querySelector('.log-reason').classList.toggle('show');
+      });
+
+      logBody.prepend(div);
+
+      // Trim
+      while (logBody.children.length > MAX_LOG + 1) {
+        logBody.removeChild(logBody.lastChild);
+      }
+
+      if (autoScroll) {
+        logBody.scrollTop = 0;
+      }
+    }
+
+    // ---- Annotations toggle ------------------------------------------------
+    function toggleAnnotations() {
+      annotationsOn = !annotationsOn;
+      document.querySelectorAll('.annotation').forEach(el => {
+        el.style.display = annotationsOn ? '' : 'none';
+      });
+      document.getElementById('btn-ann').textContent =
+        (annotationsOn ? '\u2699\ufe0f' : '\u2699\ufe0f') + ' Annotations';
+    }
+
+    function toggleLogAnnotations() {
+      logAnnotationsOn = !logAnnotationsOn;
+      document.querySelectorAll('.log-reason').forEach(el => {
+        el.classList.toggle('show', logAnnotationsOn);
+      });
+      document.getElementById('btn-ann-log').textContent =
+        logAnnotationsOn ? '\u2139 Reasons' : '\u2139 Reasons';
+    }
+
+    // ---- Controls -----------------------------------------------------------
+    function setLoading(btnId, loading) {
+      const b = document.getElementById(btnId);
+      if (b) b.disabled = loading;
+    }
+
+    async function controlFlywheel(action) {
+      const btn = action === 'start' ? 'btn-start' : 'btn-stop';
+      setLoading(btn, true);
+      try {
+        const r = await fetch('/api/control/flywheel', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({action})
+        });
+        const d = await r.json();
+        showToast(action === 'start' ? 'Flywheel started' : 'Flywheel stopped',
+                  action === 'start' ? 'toast-green' : '');
+      } finally {
+        setLoading(btn, false);
+      }
+    }
+
+    async function controlDreamer(action, model_version) {
+      const btnId = action === 'start'
+        ? (model_version === 'cosmos3-edge-v2' ? 'btn-dream-v2' : 'btn-dream-v1')
+        : 'btn-dream-stop';
+      setLoading(btnId, true);
+      try {
+        const r = await fetch('/api/control/dreamer', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({action, model_version})
+        });
+        const d = await r.json();
+        if (action === 'start') {
+          const ver = model_version === 'cosmos3-edge-v2' ? 'v2' : 'v1';
+          showToast('Dreamer started \u2014 generating ' + ver + ' Forward Dynamics rollout\u2026',
+                    ver === 'v2' ? 'toast-gold' : 'toast-blue');
+        }
+      } finally {
+        setLoading(btnId, false);
+      }
+    }
+
+    async function controlClear() {
+      if (!confirm('Clear all episode data on Thor? This cannot be undone.')) return;
+      setLoading('btn-clear', true);
+      try {
+        const r = await fetch('/api/control/clear', {method: 'POST'});
+        const d = await r.json();
+        document.getElementById('log-body').innerHTML =
+          '<div id="log-empty">Cleared \u2014 episodes will appear here when flywheel runs</div>';
+        logEntries = [];
+        showToast('Cleared ' + d.cleared + ' episode files', '');
+      } finally {
+        setLoading('btn-clear', false);
+      }
+    }
+
+    // ---- Toast --------------------------------------------------------------
+    let toastTimer = null;
+    function showToast(msg, cls) {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.className = 'show ' + (cls || '');
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => {
+        t.className = '';
+      }, 4000);
+    }
+    </script>
+    </body>
+    </html>
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dashboard
+  namespace: flywheel
+---
+# Flywheel namespace: read + scale Deployments (for controls)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dashboard-flywheel
+  namespace: flywheel
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    verbs: ["get", "list", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dashboard-flywheel
+  namespace: flywheel
+subjects:
+  - kind: ServiceAccount
+    name: dashboard
+    namespace: flywheel
+roleRef:
+  kind: Role
+  name: dashboard-flywheel
+  apiGroup: rbac.authorization.k8s.io
+---
+# vllm namespace: read Service selector to detect active model version
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dashboard-vllm-reader
+  namespace: vllm
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dashboard-vllm-reader
+  namespace: vllm
+subjects:
+  - kind: ServiceAccount
+    name: dashboard
+    namespace: flywheel
+roleRef:
+  kind: Role
+  name: dashboard-vllm-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dashboard
+  namespace: flywheel
+  labels:
+    app: dashboard
+spec:
+  replicas: 1
+  revisionHistoryLimit: 0
+  selector:
+    matchLabels:
+      app: dashboard
+  template:
+    metadata:
+      labels:
+        app: dashboard
+    spec:
+      serviceAccountName: dashboard
+      containers:
+        - name: dashboard
+          image: docker.io/library/python:3.12-slim
+          command:
+            - sh
+            - -c
+            - pip install -q flask kubernetes && python /app/dashboard.py
+          ports:
+            - containerPort: 8080
+          env:
+            - name: FLYWHEEL_NS
+              value: "flywheel"
+            - name: VLLM_NS
+              value: "vllm"
+            - name: TRIGGER_THRESHOLD
+              value: "10"
+            - name: FRAMES_DIR
+              value: "/data/frames"
+            - name: HTML_FILE
+              value: "/app/index.html"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          volumeMounts:
+            - name: code
+              mountPath: /app
+              readOnly: true
+            - name: episodes
+              mountPath: /data/episodes
+              readOnly: true
+            - name: dreams
+              mountPath: /data/dreams
+              readOnly: true
+            - name: frames
+              mountPath: /data/frames
+              readOnly: true
+      volumes:
+        - name: code
+          configMap:
+            name: dashboard-code
+        - name: episodes
+          hostPath:
+            path: /var/lib/episodes
+        - name: dreams
+          hostPath:
+            path: /var/lib/dreams
+        - name: frames
+          hostPath:
+            path: /var/lib/robot-sim/frames
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dashboard
+  namespace: flywheel
+spec:
+  type: NodePort
+  selector:
+    app: dashboard
+  ports:
+    - port: 8080
+      targetPort: 8080
+      nodePort: 30801
