@@ -6,28 +6,90 @@ metadata:
   namespace: flywheel
 data:
   curator.py: |
-    """On-device episode curator — scores episodes on measurable quality signals, passes or drops."""
+    """On-device episode curator — scores episodes on embodied-reasoning quality.
+
+    DESIGN (D030-C / D030-A): Curation signal is reasoning quality and action-
+    selection quality, NOT HTTP latency. Latency is an infrastructure metric;
+    it says nothing about whether the world model chose the right action.
+
+    Scoring rubric:
+      1. Injected failure              -> 0.0  (explicit bad signal, never train on)
+      2. Reasoning parse failures      -> 0.1 per bad tick  (model couldn't reason)
+      3. Action selection quality      -> based on action_smoothness
+           smoothness < SMOOTHNESS_THRESHOLD: GOOD (low delta = physically plausible)
+           smoothness >= threshold:           penalty  (high delta = jerky/implausible)
+      4. Reasoning confidence          -> weighted bonus (avg_confidence)
+      5. Good-selection ratio          -> bonus for majority-good ticks
+
+    The resulting score is the training signal for the Reasoner SFT: high-score
+    episodes (model reasoned validly and selected physically-plausible actions)
+    become training examples; low-score episodes are rejected on-device.
+    """
     import json, os, time, pathlib
 
-    RAW_DIR = pathlib.Path(os.environ.get("RAW_DIR", "/data/episodes/raw"))
-    CURATED_DIR = pathlib.Path(os.environ.get("CURATED_DIR", "/data/episodes/curated"))
-    REJECTED_DIR = pathlib.Path(os.environ.get("REJECTED_DIR", "/data/episodes/rejected"))
-    LATENCY_BUDGET_MS = float(os.environ.get("LATENCY_BUDGET_MS", "8000"))
+    RAW_DIR             = pathlib.Path(os.environ.get("RAW_DIR",      "/data/episodes/raw"))
+    CURATED_DIR         = pathlib.Path(os.environ.get("CURATED_DIR",  "/data/episodes/curated"))
+    REJECTED_DIR        = pathlib.Path(os.environ.get("REJECTED_DIR", "/data/episodes/rejected"))
+    PASS_THRESHOLD      = float(os.environ.get("PASS_THRESHOLD",      "0.5"))
+    SMOOTHNESS_THRESHOLD = float(os.environ.get("SMOOTHNESS_THRESHOLD", "0.15"))
 
     def score_episode(episode: dict) -> tuple[float, str]:
+        """Return (score 0.0-1.0, reason string)."""
+        ticks = episode.get("tick_data", [])
+        n     = max(len(ticks), 1)
+
+        # Gate 0: injected failures never leave the device
         if episode.get("has_failure"):
             return 0.0, "injected-failure"
-        if not episode.get("all_within_budget"):
-            avg = episode.get("avg_latency_ms", 0)
-            if avg > LATENCY_BUDGET_MS:
-                return 0.2, f"latency-exceeded ({avg:.0f}ms > {LATENCY_BUDGET_MS:.0f}ms)"
-        error_ticks = sum(1 for t in episode.get("tick_data", []) if t.get("action_result", {}).get("error"))
-        if error_ticks > 0:
-            return 0.1, f"inference-errors ({error_ticks}/{episode.get('ticks', 0)} ticks)"
-        return 1.0, "clean"
+
+        # Gate 1: reasoning parse failures
+        bad_ticks = [t for t in ticks if not t.get("reasoning", {}).get("valid", False)]
+        if len(bad_ticks) == n:
+            return 0.1, f"all-reasoning-invalid ({n}/{n} ticks)"
+
+        parse_penalty = len(bad_ticks) / n * 0.3  # up to -0.30 for parse failures
+
+        # Gate 2: action smoothness (lower = more physically plausible)
+        avg_smoothness = episode.get("avg_smoothness", 0.0)
+        if avg_smoothness >= SMOOTHNESS_THRESHOLD:
+            # Jerky trajectory — scale penalty by how far over threshold
+            excess    = avg_smoothness - SMOOTHNESS_THRESHOLD
+            smooth_pen = min(0.4, excess * 2.0)  # up to -0.40
+        else:
+            smooth_pen = 0.0
+
+        # Bonus: reasoning confidence
+        conf_bonus = episode.get("avg_confidence", 0.0) * 0.2  # up to +0.20
+
+        # Bonus: good-selection ratio
+        good = episode.get("good_selections", 0)
+        sel_bonus = (good / n) * 0.1  # up to +0.10
+
+        raw_score = 1.0 - parse_penalty - smooth_pen + conf_bonus + sel_bonus
+        score     = round(max(0.0, min(1.0, raw_score)), 3)
+
+        if score >= PASS_THRESHOLD:
+            reason = (
+                f"clean (smoothness={avg_smoothness:.4f} "
+                f"conf={episode.get('avg_confidence',0):.2f} "
+                f"good={good}/{n})"
+            )
+        else:
+            parts = []
+            if parse_penalty > 0:   parts.append(f"parse-failures={len(bad_ticks)}/{n}")
+            if smooth_pen   > 0:    parts.append(f"jerky-trajectory(s={avg_smoothness:.4f})")
+            reason = " ".join(parts) or "low-quality"
+
+        return score, reason
 
     if __name__ == "__main__":
-        print(f"[curator] Starting — latency budget {LATENCY_BUDGET_MS}ms, watching {RAW_DIR}", flush=True)
+        print(
+            f"[curator] Starting — embodied-reasoning quality scorer\n"
+            f"  pass_threshold={PASS_THRESHOLD} "
+            f"smoothness_threshold={SMOOTHNESS_THRESHOLD}\n"
+            f"  watching {RAW_DIR}",
+            flush=True,
+        )
         CURATED_DIR.mkdir(parents=True, exist_ok=True)
         REJECTED_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -36,24 +98,30 @@ data:
                 try:
                     episode = json.loads(path.read_text())
                     score, reason = score_episode(episode)
-                    episode["curation_score"] = round(score, 3)
-                    episode["curation_reason"] = reason
+                    episode["curation_score"]   = score
+                    episode["curation_reason"]  = reason
 
-                    if score >= 0.5:
+                    if score >= PASS_THRESHOLD:
                         episode["curation_verdict"] = "pass"
                         dest = CURATED_DIR / path.name
                         dest.write_text(json.dumps(episode, indent=2))
-                        print(f"[curator] PASS {episode['episode_id']} score={score:.2f} ({reason})", flush=True)
+                        print(
+                            f"[curator] PASS  {episode['episode_id']} "
+                            f"score={score:.3f} ({reason})",
+                            flush=True,
+                        )
                     else:
                         episode["curation_verdict"] = "reject"
                         dest = REJECTED_DIR / path.name
                         dest.write_text(json.dumps(episode, indent=2))
-                        print(f"[curator] REJECT {episode['episode_id']} score={score:.2f} ({reason})", flush=True)
-
+                        print(
+                            f"[curator] REJECT {episode['episode_id']} "
+                            f"score={score:.3f} ({reason})",
+                            flush=True,
+                        )
                     path.unlink()
                 except Exception as e:
                     print(f"[curator] Error processing {path.name}: {e}", flush=True)
-
             time.sleep(3)
 ---
 apiVersion: apps/v1
@@ -76,8 +144,14 @@ spec:
           image: docker.io/library/python:3.12-slim
           command: ["python", "/app/curator.py"]
           env:
-            - name: LATENCY_BUDGET_MS
-              value: "8000"
+            - name: PASS_THRESHOLD
+              value: "0.5"
+            # SMOOTHNESS_THRESHOLD: max acceptable mean joint-delta per step.
+            # Below = physically plausible trajectory; above = jerky / penalised.
+            # 0.15 is empirically calibrated against the UMI action chunk norms
+            # in assets/bridgedata2/action_pool.json (good chunks ~0.07, bad ~0.35).
+            - name: SMOOTHNESS_THRESHOLD
+              value: "0.15"
           volumeMounts:
             - name: code
               mountPath: /app

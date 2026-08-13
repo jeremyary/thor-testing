@@ -1,0 +1,379 @@
+# This project was developed with assistance from AI tools.
+#
+# dreamer — Forward Dynamics "dream before deploy" workload.
+#
+# D030-B: Cosmos3-Edge Forward Dynamics mode (image + action chunk -> rollout video)
+# is the no-robot-needed centerpiece of this PoC. It runs on-Thor (same Blackwell
+# GPU as the Reasoner), benchmarked by NVIDIA at 2.59s E2E on the T5000 in MAXN mode
+# for [32,8] action chunks — real-time capable at 5Hz.
+#
+# GPU contention: the dreamer runs on the same GPU as the cosmos3-edge Reasoner.
+# Sequencing strategy: dreamer operates in a POST-EPISODE mode — it waits for
+# a fully curated episode JSON (written by the curator to /data/episodes/curated/),
+# reads the dream_action_chunk from it, then calls Forward Dynamics while the
+# Reasoner is between episodes (not during a tick). The GPU is never double-booked
+# in this design: curator writes -> dreamer reads -> dream call -> rollout stored.
+#
+# Output: two MP4 rollout videos per promoted model comparison:
+#   /data/dreams/<episode_id>-v1.mp4  (baseline: using the pre-SFT model)
+#   /data/dreams/<episode_id>-v2.mp4  (promoted: using the post-SFT model)
+# These are the Gate 2 artifacts uploaded by sync-agent to MinIO (eval-reports bucket)
+# and surfaced in the PR body.
+#
+# The dreamer runs at replicas=0 normally and is scaled to 1 by the dream-trigger
+# script in DEMO_RUNBOOK.md before Act 3. It processes the episode queue and exits
+# when the queue is empty.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dreamer-code
+  namespace: flywheel
+data:
+  dreamer.py: |
+    """Forward Dynamics dreamer — the 'dream before deploy' step.
+
+    For each curated episode in the queue:
+    1. Load the episode's conditioning frame (BridgeData2 first-frame, 256x256 RGB)
+    2. Load the episode's dream_action_chunk ([16,10] or [32,8] normalized joints)
+    3. Call Cosmos3-Edge Forward Dynamics: image + action -> rollout video MP4
+    4. Store the rollout video in /data/dreams/<episode_id>-<model_version>.mp4
+    5. Upload to MinIO eval-reports bucket and update the episode JSON with the
+       dream_video_uri so downstream (Gate 2 / sync-agent) can reference it.
+
+    The forward dynamics call uses vLLM-Omni's /v1/videos endpoint (async job):
+      POST /v1/videos  with action_mode=forward_dynamics, domain_name, action_path
+      GET  /v1/videos/<job_id> until status=completed
+      GET  /v1/videos/<job_id>/content -> MP4 bytes
+
+    GPU contention note: Forward Dynamics uses the same GPU as the cosmos3-edge
+    Reasoner. The dreamer is designed to run between episodes (the Reasoner is idle
+    when the dreamer is active). Do not run dreamer concurrently with robot-sim.
+    """
+    import json, os, time, pathlib, base64, tempfile, urllib.request, urllib.error
+
+    VLLM_URL       = os.environ.get("VLLM_URL",    "http://cosmos3-edge.vllm.svc:8000")
+    CURATED_DIR    = pathlib.Path(os.environ.get("CURATED_DIR",   "/data/episodes/curated"))
+    DREAMS_DIR     = pathlib.Path(os.environ.get("DREAMS_DIR",    "/data/dreams"))
+    FRAMES_DIR     = pathlib.Path(os.environ.get("FRAMES_DIR",    "/data/frames"))
+    S3_ENDPOINT    = os.environ.get("S3_ENDPOINT")
+    S3_BUCKET_EVAL = os.environ.get("S3_BUCKET_EVAL", "eval-reports")
+    S3_ACCESS_KEY  = os.environ.get("S3_ACCESS_KEY")
+    S3_SECRET_KEY  = os.environ.get("S3_SECRET_KEY")
+    MODEL_VERSION  = os.environ.get("MODEL_VERSION",  "cosmos3-edge-v1")
+    # Number of denoising steps: fewer = faster, lower quality.
+    # 20 steps gives a watchable rollout in ~2.5s on T5000 MAXN.
+    DIFFUSION_STEPS = int(os.environ.get("DIFFUSION_STEPS", "20"))
+    # Action chunk window: how many timesteps to send. 16 = canonical single chunk.
+    ACTION_CHUNK_SIZE = int(os.environ.get("ACTION_CHUNK_SIZE", "16"))
+    POLL_INTERVAL_S   = float(os.environ.get("POLL_INTERVAL_S", "1.0"))
+    JOB_TIMEOUT_S     = float(os.environ.get("JOB_TIMEOUT_S",  "120.0"))
+
+    def s3_client():
+        import boto3
+        return boto3.client(
+            "s3",
+            endpoint_url         = S3_ENDPOINT,
+            aws_access_key_id    = S3_ACCESS_KEY,
+            aws_secret_access_key= S3_SECRET_KEY,
+        )
+
+    def write_action_file(action_chunk: list, domain_name: str, tmp_dir: str) -> str:
+        """Write action chunk to a temp JSON file in vLLM-Omni's expected format."""
+        # vLLM-Omni forward_dynamics expects action as a flat 2D array
+        # shaped [T, D] where T=timesteps, D=action dimensions
+        chunk = action_chunk[:ACTION_CHUNK_SIZE]  # trim if longer
+        action_data = {
+            "domain_name":      domain_name,
+            "action_chunk_size": len(chunk),
+            "actions":          chunk,
+        }
+        path = pathlib.Path(tmp_dir) / "action_chunk.json"
+        path.write_text(json.dumps(action_data))
+        return str(path)
+
+    def call_forward_dynamics(frame_path: pathlib.Path,
+                              action_chunk: list,
+                              domain_name: str) -> bytes | None:
+        """Call Cosmos3-Edge Forward Dynamics and return MP4 bytes.
+
+        vLLM-Omni Forward Dynamics API (from Cosmos3 docs):
+          POST /v1/videos  (multipart form)
+            action_mode=forward_dynamics
+            domain_name=<domain>
+            num_frames=<ACTION_CHUNK_SIZE+1>  (rollout frames = chunk + 1 initial)
+            fps=5
+            num_inference_steps=<DIFFUSION_STEPS>
+            input_reference=<conditioning_frame_file>
+            extra_params={"action_path":"<path>","use_resolution_template":false,...}
+          -> JSON with id field (async job)
+          GET /v1/videos/<id> -> {status: pending|processing|completed|failed}
+          GET /v1/videos/<id>/content -> MP4 bytes
+        """
+        if not frame_path.exists():
+            print(f"[dreamer] Frame not found: {frame_path}", flush=True)
+            return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            action_file = write_action_file(action_chunk, domain_name, tmp)
+            num_frames  = len(action_chunk[:ACTION_CHUNK_SIZE]) + 1
+
+            # Build multipart request via urllib
+            boundary = "----DreamerBoundary7890"
+            def part(name, value, filename=None, content_type="text/plain"):
+                disp = f'Content-Disposition: form-data; name="{name}"'
+                if filename:
+                    disp += f'; filename="{filename}"'
+                ct = f"\r\nContent-Type: {content_type}" if content_type != "text/plain" else ""
+                return (f"--{boundary}\r\n{disp}{ct}\r\n\r\n"
+                        f"{value}\r\n").encode()
+
+            frame_bytes = frame_path.read_bytes()
+
+            body_parts = [
+                part("action_mode",          "forward_dynamics"),
+                part("num_frames",           str(num_frames)),
+                part("fps",                  "5"),
+                part("num_inference_steps",  str(DIFFUSION_STEPS)),
+                part("guidance_scale",       "1.0"),
+                part("extra_params", json.dumps({
+                    "action_path":              action_file,
+                    "domain_name":              domain_name,
+                    "use_resolution_template":  False,
+                    "use_duration_template":    False,
+                    "guardrails":               False,
+                })),
+                # Conditioning frame
+                (f"--{boundary}\r\n"
+                 f'Content-Disposition: form-data; name="input_reference"; filename="frame.jpg"\r\n'
+                 f"Content-Type: image/jpeg\r\n\r\n").encode() + frame_bytes + b"\r\n",
+                f"--{boundary}--\r\n".encode(),
+            ]
+            body = b"".join(b if isinstance(b, bytes) else b.encode() for b in body_parts)
+
+            req = urllib.request.Request(
+                f"{VLLM_URL}/v1/videos",
+                data=body,
+                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+                method="POST",
+            )
+
+            print(f"[dreamer] Submitting Forward Dynamics job "
+                  f"(domain={domain_name} frames={num_frames} steps={DIFFUSION_STEPS})",
+                  flush=True)
+            t0 = time.monotonic()
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    job = json.loads(resp.read())
+            except Exception as e:
+                print(f"[dreamer] Job submission failed: {e}", flush=True)
+                return None
+
+            job_id = job.get("id")
+            if not job_id:
+                print(f"[dreamer] No job id in response: {job}", flush=True)
+                return None
+
+            # Poll until complete
+            print(f"[dreamer] Polling job {job_id}...", flush=True)
+            deadline = time.monotonic() + JOB_TIMEOUT_S
+            while time.monotonic() < deadline:
+                try:
+                    with urllib.request.urlopen(
+                        f"{VLLM_URL}/v1/videos/{job_id}", timeout=10
+                    ) as resp:
+                        status = json.loads(resp.read())
+                    st = status.get("status", "")
+                    if st == "completed":
+                        elapsed = round(time.monotonic() - t0, 1)
+                        print(f"[dreamer] Job {job_id} completed in {elapsed}s", flush=True)
+                        break
+                    elif st == "failed":
+                        print(f"[dreamer] Job {job_id} failed: {status}", flush=True)
+                        return None
+                except Exception as e:
+                    print(f"[dreamer] Poll error: {e}", flush=True)
+                time.sleep(POLL_INTERVAL_S)
+            else:
+                print(f"[dreamer] Job {job_id} timed out after {JOB_TIMEOUT_S}s", flush=True)
+                return None
+
+            # Download MP4
+            try:
+                with urllib.request.urlopen(
+                    f"{VLLM_URL}/v1/videos/{job_id}/content", timeout=30
+                ) as resp:
+                    mp4_bytes = resp.read()
+                print(f"[dreamer] Downloaded rollout: {len(mp4_bytes)//1024}KB", flush=True)
+                return mp4_bytes
+            except Exception as e:
+                print(f"[dreamer] MP4 download failed: {e}", flush=True)
+                return None
+
+    def upload_dream(s3, episode_id: str, model_version: str, mp4_bytes: bytes) -> str:
+        key = f"dreams/{episode_id}-{model_version}.mp4"
+        s3.put_object(
+            Bucket=S3_BUCKET_EVAL,
+            Key=key,
+            Body=mp4_bytes,
+            ContentType="video/mp4",
+        )
+        uri = f"s3://{S3_BUCKET_EVAL}/{key}"
+        print(f"[dreamer] Uploaded dream: {uri}", flush=True)
+        return uri
+
+    def process_episode(path: pathlib.Path) -> bool:
+        """Process one curated episode: generate Forward Dynamics rollout, upload."""
+        try:
+            episode    = json.loads(path.read_text())
+            episode_id = episode["episode_id"]
+            scene      = episode.get("scene", "pick_place")
+            chunk      = episode.get("dream_action_chunk", [])
+            domain     = episode.get("dream_domain", "umi")
+            ep_model   = episode.get("model_version", MODEL_VERSION)
+
+            if not chunk:
+                print(f"[dreamer] {episode_id}: no dream_action_chunk, skipping", flush=True)
+                return False
+
+            frame_path = FRAMES_DIR / episode.get("frame_path", f"{scene}.jpg")
+            mp4_bytes  = call_forward_dynamics(frame_path, chunk, domain)
+            if mp4_bytes is None:
+                return False
+
+            # Store locally
+            DREAMS_DIR.mkdir(parents=True, exist_ok=True)
+            local_mp4 = DREAMS_DIR / f"{episode_id}-{ep_model}.mp4"
+            local_mp4.write_bytes(mp4_bytes)
+
+            # Upload to MinIO if credentials available
+            dream_uri = None
+            if S3_ENDPOINT and S3_ACCESS_KEY:
+                try:
+                    s3        = s3_client()
+                    dream_uri = upload_dream(s3, episode_id, ep_model, mp4_bytes)
+                except Exception as e:
+                    print(f"[dreamer] S3 upload failed (local copy kept): {e}", flush=True)
+
+            # Write back dream_video_uri into episode JSON
+            episode["dream_video_uri"]   = dream_uri or str(local_mp4)
+            episode["dream_model_version"] = ep_model
+            path.write_text(json.dumps(episode, indent=2))
+            print(
+                f"[dreamer] DREAM COMPLETE {episode_id} "
+                f"scene={scene} model={ep_model} mp4={len(mp4_bytes)//1024}KB",
+                flush=True,
+            )
+            return True
+        except Exception as e:
+            print(f"[dreamer] Error processing {path.name}: {e}", flush=True)
+            return False
+
+    if __name__ == "__main__":
+        print(
+            f"[dreamer] Starting — Forward Dynamics dream workload\n"
+            f"  vllm_url={VLLM_URL} diffusion_steps={DIFFUSION_STEPS}\n"
+            f"  watching {CURATED_DIR}",
+            flush=True,
+        )
+        processed = 0
+        while True:
+            episodes = sorted(CURATED_DIR.glob("*.json"))
+            # Only process episodes that don't yet have a dream video
+            pending  = [
+                p for p in episodes
+                if "dream_video_uri" not in json.loads(p.read_text())
+            ]
+            if pending:
+                for path in pending:
+                    if process_episode(path):
+                        processed += 1
+            else:
+                # Idle — check every 15s
+                time.sleep(15)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dreamer
+  namespace: flywheel
+  labels:
+    app: dreamer
+spec:
+  # replicas=0 normally. Scale to 1 to process the curated episode queue.
+  # Must NOT run concurrently with robot-sim — GPU contention on single Thor GPU.
+  # See DEMO_RUNBOOK.md Act 3 pre-flight for the sequencing procedure.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: dreamer
+  template:
+    metadata:
+      labels:
+        app: dreamer
+    spec:
+      containers:
+        - name: dreamer
+          image: docker.io/library/python:3.12-slim
+          command:
+            - sh
+            - -c
+            - pip install -q boto3 && python /app/dreamer.py
+          env:
+            - name: VLLM_URL
+              value: "http://cosmos3-edge.vllm.svc:8000"
+            - name: DIFFUSION_STEPS
+              value: "20"
+            - name: ACTION_CHUNK_SIZE
+              value: "16"
+            - name: MODEL_VERSION
+              value: "cosmos3-edge-v1"
+            - name: S3_ENDPOINT
+              value: "https://minio-api-robotics-data.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com"
+            - name: S3_BUCKET_EVAL
+              value: "eval-reports"
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: hub-credentials
+                  key: s3-access-key
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: hub-credentials
+                  key: s3-secret-key
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+          volumeMounts:
+            - name: code
+              mountPath: /app
+              readOnly: true
+            - name: episodes
+              mountPath: /data/episodes
+            - name: dreams
+              mountPath: /data/dreams
+            - name: frames
+              mountPath: /data/frames
+              readOnly: true
+            - name: action-pool
+              mountPath: /data/action_pool.json
+              subPath: action_pool.json
+              readOnly: true
+      volumes:
+        - name: code
+          configMap:
+            name: dreamer-code
+        - name: episodes
+          hostPath:
+            path: /var/lib/episodes
+        - name: dreams
+          hostPath:
+            path: /var/lib/dreams
+        - name: frames
+          hostPath:
+            path: /var/lib/robot-sim/frames
+        - name: action-pool
+          hostPath:
+            path: /var/lib/robot-sim/action_pool.json

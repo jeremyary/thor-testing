@@ -439,4 +439,36 @@ No fixes were applied because there was nothing on the deprecation list to fix.
 
 **Follow-up not done here, flagged for later:** (1) audit whether any *other* out-of-repo, manually-configured credential file on Thor or the hub still references `thor-puller` (this repo's own `gitops/` and live-cluster checks in D024 were thorough, but by definition can't cover config that lives only on the device and isn't tracked anywhere — `/etc/ostree/auth.json` was exactly this kind of blind spot); (2) if this `bootc` `SIGABRT` recurs, capture a coredump (`sudo coredumpctl dump <pid>` before it's pruned, or set `ulimit -c unlimited` for the invoking shell) and consider filing upstream against `containers/bootc` — two occurrences in one day with no obvious environmental trigger (disk space was never the issue — 627G free) is enough of a pattern to be worth a real report if it happens again.
 
+**Files changed:** none in-repo. `DECISIONS.md` (this entry) is the only artifact.
+
+## D030: Flywheel redesign — Reasoner SFT over DROID policy post-training; Forward Dynamics as no-robot centerpiece
+
+**Date:** 2026-08-13
+
+**Context:** After completing Phase 3-5 infrastructure (Kafka consumer, KFP pipeline skeleton, blue/green, OTel, Perses), a design review surfaced two problems with the original approach: (1) robot-sim was calling the Cosmos3-Edge Reasoner via `/v1/chat/completions` in a text-chatbot pattern, which does not demonstrate any capability unique to a world model; and (2) the KFP `finetune_cosmos3` step targeted DROID policy post-training — a recipe that requires 758 GB of training data, 8×H100 multi-node HSDP, and action-head initialization from scratch — none of which is feasible on the single L40S (g6e.2xlarge) available on this OSD cluster. Had that path continued, the "training" step would have been emulated (stubbed loss, fake checkpoint) while presenting itself as genuine robot-policy learning. That would have undermined the "RH understands this world" thesis this PoC exists to prove.
+
+**Decisions made:**
+
+**D030-A: Reasoner SFT replaces DROID policy post-training.**
+The fine-tuning target is the Cosmos3-Edge Reasoner (Nemotron-2B-Dense-VL) via cosmos-framework's Reasoner SFT pattern (analogous to `launch_sft_videophy2_edge.sh`). This recipe loads weights directly from `nvidia/Cosmos3-Edge` with no DCP conversion, trains the 2B language model with the vision tower frozen, and is documented by NVIDIA as feasible on 4-GPU configurations — making a single L40S with gradient checkpointing tractable for a truncated demo run. The fine-tuning signal is **embodied reasoning quality** on our curated (frame, instruction, reasoning) episodes, which directly measures the model's action-selection and scene-interpretation improvement — the genuine output of the flywheel. DROID policy post-training is explicitly deferred as a "real arm" future milestone; see D030-D below.
+
+**D030-B: Forward Dynamics is the no-robot centerpiece ("dream before deploy").**
+Cosmos3-Edge's Forward Dynamics mode (image + action chunk → rollout video) requires no physical robot and runs on-device at 2.59s E2E on the Thor T5000 in MAXN mode (benchmarked by NVIDIA, `[32,8]` action chunk, real-time at 5Hz). This is the capability no other model in the stack can replicate. The Act-3 demo beat — "here is what the trained model believes will happen before we deploy it" — is grounded entirely in genuine world-model inference, not simulation. Forward Dynamics runs on Thor to keep the edge-device story coherent; GPU-contention with the Reasoner is managed by sequencing (Reasoner pauses during dream).
+
+**D030-C: Action-chunk selection drives the flywheel signal (option ii-b).**
+The flywheel improves *which* action chunk the curated/trained selector picks for a given scene — not the action chunk values themselves. This avoids the text→joint-vector bridge that option (i) would have required (a fictitious mapping from Reasoner text output to DROID 8-DOF trajectories). Under (ii-b), action chunks are sourced from real DROID trajectories (BridgeData2 / NVIDIA example data); the Reasoner's job is embodied scene interpretation and action-selection quality. If (ii-b) proves insufficiently demonstrable in practice, fallback (ii) uses canned real action chunks from the NVIDIA `example_action_fd_umi_action_chunks.json` asset directly. Option (i) is permanently rejected.
+
+**D030-D: DROID policy post-training is deferred — explicit roadmap item, not abandoned.**
+The DROID recipe (`cosmos-framework` `launch_sft_action_policy_droid_nano.sh`) is technically correct and is NVIDIA's documented path for adapting Cosmos to a specific robot embodiment. Its requirements (758 GB `nvidia/Cosmos3-DROID` dataset in LeRobotDataset v3.0 format, 8×H100 multi-node training, action-head fresh initialization) are incompatible with the current compute envelope. The right trigger for this path is: a physical robot arm integrated with Thor (or a Jetson-attached manipulator), plus access to multi-GPU training capacity. The existing KFP pipeline skeleton, Kueue LocalQueue, and L40S node are preserved for that moment. This deferral is stated explicitly in the demo — "next step is a real arm" — which is a stronger product roadmap statement than faking the training.
+
+**D030-E: BridgeData2 seed frames sourced (5 frames, one per scene archetype).**
+Five first-frames extracted from `nvidia/BridgeData2-Subset-Synthetic-Captions` (OpenMDW 1.1, commercial-OK, Walke et al. 2023) and stored in `assets/bridgedata2/frames/`. Robot-sim scenes updated to tabletop manipulation archetypes matching BridgeData2's WidowX distribution (replacing the two non-applicable scenes: "delivery robot on sidewalk" and "humanoid robot in hallway"). Full provenance in `assets/bridgedata2/ATTRIBUTION.md`.
+
+**Feasibility evidence:**
+- Cosmos3-Edge-Policy-DROID README, vLLM-Omni latency table: "NVIDIA Jetson AGX Thor T5000, 128 GB, MAXN — 2.59s E2E, real-time at 5Hz" for `[32,8]` action chunk forward dynamics.
+- cosmos-framework `docs/training.md`: Edge Reasoner SFT "Only 2B, so it runs on a 4-GPU (e.g. GB200×4) or 8-GPU allocation" — single-GPU feasible with `NPROC_PER_NODE=1` and gradient checkpointing.
+- All three model assets (Cosmos3-Edge, Cosmos3-Edge-Policy-DROID, BridgeData2-Subset-Synthetic-Captions) confirmed publicly available, ungated, OpenMDW 1.1.
+
+**Files changed:** `DECISIONS.md` (this entry), `assets/bridgedata2/ATTRIBUTION.md` (new), `assets/bridgedata2/frames/` (5 first-frames, new).
+
 **Files changed:** none in-repo — both the auth.json fix and the bootc retry are live device-only changes, matching D018/D019/D024's precedent that Thor's manually-configured, non-GitOps credential files aren't tracked in this repo. `DECISIONS.md` (this entry) is the only artifact.
