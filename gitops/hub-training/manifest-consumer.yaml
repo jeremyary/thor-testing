@@ -67,15 +67,17 @@ data:
             return False
 
         token = get_sa_token()
+        # Pipeline parameters must match the compiled pipeline's inputDefinitions.
+        # The cosmos3-edge-finetune pipeline expects: s3_endpoint, s3_bucket,
+        # s3_access_key, s3_secret_key, model_id, max_steps, learning_rate,
+        # threshold_loss, threshold_parse_rate, threshold_good_sel_rate,
+        # registry, image_name, model_version, github_repo.
+        # All have defaults, so we only need to pass the display_name.
         payload = {
             "display_name": f"cosmos3-finetune-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}",
             "pipeline_version_reference": {"pipeline_id": TRAINING_PIPELINE_ID},
             "runtime_config": {
-                "parameters": {
-                    "episode_count": str(episode_count),
-                    "trigger_timestamp": datetime.now(timezone.utc).isoformat(),
-                    "episode_ids": json.dumps([m.get("episode_id") for m in manifests]),
-                }
+                "parameters": {}
             },
         }
         body = json.dumps(payload).encode()
