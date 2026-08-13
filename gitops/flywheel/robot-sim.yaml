@@ -293,15 +293,22 @@ data:
 
                 latency_ms = round((time.monotonic() - t0) * 1000, 1)
 
-                # Extract action chunk from the response
+                # Extract action chunk from the response.
+                # vLLM-Omni returns action.data as a list of lists [[D vals], ...]
+                # already shaped [T, D] — no reshape needed.
                 chunk = []
                 if action_data and isinstance(action_data, dict):
                     raw = action_data.get("data", [])
-                    shape = action_data.get("shape", [])
-                    if raw and len(shape) == 2:
-                        # Reshape flat array into [T, D]
-                        T, D = shape
-                        chunk = [raw[i*D:(i+1)*D] for i in range(T)]
+                    if raw and isinstance(raw, list):
+                        if isinstance(raw[0], list):
+                            # Already [T, D] shaped
+                            chunk = raw
+                        else:
+                            # Flat array — reshape using shape field
+                            shape = action_data.get("shape", [])
+                            if len(shape) == 2:
+                                T, D = shape
+                                chunk = [raw[i*D:(i+1)*D] for i in range(T)]
 
                 smoothness = _action_smoothness(chunk)
 
@@ -395,6 +402,7 @@ data:
                     "status":       t2i_result.get("status", "error"),
                     "image_size":   t2i_result.get("image_size_bytes", 0),
                     "latency_ms":   t2i_result.get("latency_ms", 0),
+                    "error":        t2i_result.get("error", ""),
                 },
                 # Action policy signals
                 "policy": {
@@ -403,6 +411,7 @@ data:
                     "smoothness":   smoothness,
                     "domain_name":  policy_result.get("domain_name", ""),
                     "latency_ms":   policy_result.get("latency_ms", 0),
+                    "error":        policy_result.get("error", ""),
                 },
                 # Combined quality score (used by curator)
                 "gen_ok":            gen_ok,
