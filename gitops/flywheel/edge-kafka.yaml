@@ -10,6 +10,11 @@ data:
     process.roles=broker,controller
     controller.quorum.voters=1@localhost:9093
     listeners=PLAINTEXT://:9092,CONTROLLER://:9093
+    # Advertise by service name so MirrorMaker2 and other clients can resolve
+    # the broker address. Without this, Kafka advertises the pod hostname
+    # (e.g., edge-kafka-58fb74f65d-mnbd8) which is unresolvable because
+    # edge-kafka is a Deployment, not a StatefulSet with a headless service.
+    advertised.listeners=PLAINTEXT://edge-kafka.flywheel.svc:9092
     inter.broker.listener.name=PLAINTEXT
     controller.listener.names=CONTROLLER
     listener.security.protocol.map=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
