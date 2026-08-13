@@ -472,7 +472,6 @@ spec:
               readOnly: true
             - name: action-pool
               mountPath: /data/action_pool.json
-              subPath: action_pool.json
               readOnly: true
       volumes:
         - name: code
