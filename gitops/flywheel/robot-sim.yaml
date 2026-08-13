@@ -51,6 +51,27 @@ data:
     OTEL_ENDPOINT     = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318")
     COOLDOWN_S        = float(os.environ.get("EPISODE_COOLDOWN_S", "15"))
 
+    # Auto-detect the model name from the vLLM server.
+    # vLLM-Omni registers the model under its full local snapshot path
+    # (e.g., /root/.cache/huggingface/hub/models--nvidia--Cosmos3-Edge/snapshots/...)
+    # rather than the short HF name, so we query /v1/models at startup.
+    VLLM_MODEL_NAME = None
+    def _resolve_model_name():
+        global VLLM_MODEL_NAME
+        if VLLM_MODEL_NAME:
+            return VLLM_MODEL_NAME
+        try:
+            with urllib.request.urlopen(f"{VLLM_URL}/v1/models", timeout=10) as resp:
+                data = json.loads(resp.read())
+                models = data.get("data", [])
+                if models:
+                    VLLM_MODEL_NAME = models[0]["id"]
+                    print(f"[robot-sim] Resolved model name: {VLLM_MODEL_NAME}", flush=True)
+                    return VLLM_MODEL_NAME
+        except Exception as e:
+            print(f"[robot-sim] Could not resolve model name: {e}", flush=True)
+        return "nvidia/Cosmos3-Edge"
+
     tracer      = None
     otel_inject = None
     try:
@@ -116,8 +137,9 @@ data:
                            "gen.prompt_len": len(scene_prompt)}) as span:
             t0 = time.monotonic()
             try:
+                model_name = _resolve_model_name()
                 body = json.dumps({
-                    "model": "nvidia/Cosmos3-Edge",
+                    "model": model_name,
                     "prompt": scene_prompt,
                     "negative_prompt": "blurry, distorted, low quality",
                     "size": "640x640",
@@ -150,10 +172,23 @@ data:
                     span.set_attribute("gen.size_bytes", len(img_bytes))
                 return {
                     "status": "ok",
-                    "image_b64": b64_data[:100] + "..." if b64_data else "",
                     "image_size_bytes": len(img_bytes),
                     "latency_ms": latency_ms,
                 }
+            except urllib.error.HTTPError as e:
+                elapsed = round((time.monotonic() - t0) * 1000, 1)
+                err_body = ""
+                try:
+                    err_body = e.read().decode()[:300]
+                except Exception:
+                    pass
+                err_msg = f"HTTP {e.code}: {err_body}"
+                if span:
+                    span.set_attribute("gen.status", "error")
+                    span.set_attribute("gen.error", err_msg[:200])
+                    span.set_attribute("gen.latency_ms", elapsed)
+                return {"status": "error", "error": err_msg,
+                        "image_size_bytes": 0, "latency_ms": elapsed}
             except Exception as e:
                 elapsed = round((time.monotonic() - t0) * 1000, 1)
                 if span:
@@ -205,8 +240,9 @@ data:
                     "use_duration_template": False,
                 })
 
+                model_name = _resolve_model_name()
                 parts = [
-                    text_part("model", "nvidia/Cosmos3-Edge"),
+                    text_part("model", model_name),
                     text_part("prompt", task_prompt),
                     text_part("size", "320x192"),
                     text_part("num_frames", "17"),
