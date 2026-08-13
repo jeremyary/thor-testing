@@ -117,24 +117,26 @@ data:
         except Exception as e:
             log.warning(f"Failed to publish trigger event: {e}")
 
-    def build_ssl_context() -> ssl.SSLContext:
-        ctx = ssl.create_default_context(cafile=KAFKA_CA_FILE)
-        ctx.check_hostname = False
-        ctx.verify_mode    = ssl.CERT_REQUIRED  # verify cert, just not hostname
-        return ctx
-
     def run() -> None:
         from kafka import KafkaConsumer, KafkaProducer
 
-        ssl_ctx = build_ssl_context()
+        # kafka-python-ng 2.2.3 has a bug with Python 3.12: passing ssl_context
+        # fails with "Invalid file object: None" because it tries to read
+        # ssl_context.certfile which is None for server-only auth. Workaround:
+        # pass individual ssl_ params instead of ssl_context.
+        ssl_kwargs = {
+            "security_protocol": "SSL",
+            "ssl_cafile":        KAFKA_CA_FILE,
+            "ssl_check_hostname": False,
+        }
+
         log.info(f"Connecting to Kafka at {KAFKA_BOOTSTRAP}, topic={EPISODE_TOPIC}, "
                  f"threshold={TRIGGER_THRESHOLD}")
 
         consumer = KafkaConsumer(
             EPISODE_TOPIC,
             bootstrap_servers   = KAFKA_BOOTSTRAP,
-            security_protocol   = "SSL",
-            ssl_context         = ssl_ctx,
+            **ssl_kwargs,
             group_id            = CONSUMER_GROUP,
             auto_offset_reset   = "earliest",
             enable_auto_commit  = True,
@@ -143,8 +145,7 @@ data:
         )
         producer = KafkaProducer(
             bootstrap_servers = KAFKA_BOOTSTRAP,
-            security_protocol = "SSL",
-            ssl_context       = ssl_ctx,
+            **ssl_kwargs,
         )
 
         pending    = []
