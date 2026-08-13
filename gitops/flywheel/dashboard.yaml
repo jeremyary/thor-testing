@@ -175,9 +175,11 @@ data:
 
         # Extract Generator output from latest episode (D031 format)
         scene = frame = curation_score = curation_reason = curation_verdict = None
+        scene_description = None
         generation = policy = None
         if ep:
             scene            = ep.get("scene")
+            scene_description = ep.get("scene_description")
             frame            = ep.get("frame_path")
             curation_score   = ep.get("curation_score")
             curation_reason  = ep.get("curation_reason", "")
@@ -203,13 +205,14 @@ data:
             "model_version":    mv,
             "promoted":         mv == "cosmos3-edge-v2",
             "latest": {
-                "scene":            scene,
-                "frame":            frame,
-                "generation":       generation,
-                "policy":           policy,
-                "curation_score":   curation_score,
-                "curation_reason":  curation_reason,
-                "curation_verdict": curation_verdict,
+                "scene":             scene,
+                "scene_description": scene_description,
+                "frame":             frame,
+                "generation":        generation,
+                "policy":            policy,
+                "curation_score":    curation_score,
+                "curation_reason":   curation_reason,
+                "curation_verdict":  curation_verdict,
             },
             "dreams": d,
             "ts": time.time(),
@@ -486,7 +489,7 @@ data:
     /* ---- Main grid ------------------------------------------------------ */
     #main {
       display: grid;
-      grid-template-columns: 220px 1fr;
+      grid-template-columns: 320px 1fr;
       grid-template-rows: auto auto 1fr auto;
       gap: 12px;
       padding: 14px 16px;
@@ -852,11 +855,14 @@ data:
             </div>
             <img id="scene-img" style="display:none" alt="scene frame">
           </div>
-          <div id="scene-name" style="color:var(--txt2)">--</div>
-          <div class="annotation" style="margin-top:6px">
-            Real 256&times;256 robot image &mdash; NVIDIA BridgeData2 dataset
-            (WidowX arm, UC Berkeley RAIL). Used as visual conditioning for
-            the Cosmos3-Edge Action Policy and Forward Dynamics dream.
+          <div id="scene-name" style="font-size:14px;font-weight:600;margin-bottom:6px">--</div>
+          <div id="scene-prompt" style="font-size:11px;color:var(--txt2);font-style:italic;line-height:1.5;margin-bottom:8px">
+            Scene prompt will appear here...
+          </div>
+          <div class="annotation" style="margin-top:4px;font-size:10px">
+            Real 256&times;256 BridgeData2 frame (WidowX arm, UC Berkeley RAIL).
+            This image is sent to the Action Policy as visual conditioning.
+            The Text&rarr;Image prompt above generates a separate 640&times;640 scene.
           </div>
         </div>
       </div>
@@ -866,45 +872,66 @@ data:
         <div class="card-header">
           <span class="card-title">Generator Output</span>
           <span class="annotation" style="font-size:10px">
-            Cosmos3-Edge Generator: Text&rarr;Image + Action Policy (D031)
+            Cosmos3-Edge Generator: Text&rarr;Image (640&times;640) + Action Policy (DROID)
           </span>
         </div>
         <div class="card-body" id="generator-body">
-          <div id="gen-empty" style="color:var(--txt3);font-size:12px;padding:20px 0;text-align:center">
+          <div id="gen-empty" style="color:var(--txt3);font-size:12px;padding:30px 0;text-align:center">
             Awaiting first episode&hellip;
           </div>
           <div id="gen-fields" style="display:none">
-            <div class="r-field">
-              <div class="r-label">Text&rarr;Image</div>
-              <div class="r-value" id="g-t2i-status">--</div>
+            <!-- Two-column sub-layout for T2I and Policy -->
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:12px">
+              <!-- T2I column -->
+              <div style="border:1px solid var(--border);border-radius:6px;padding:12px">
+                <div style="font-size:10px;font-weight:700;text-transform:uppercase;color:var(--txt2);margin-bottom:8px">
+                  Text &rarr; Image (640&times;640)
+                </div>
+                <div class="r-field" style="border:none;padding:4px 0">
+                  <div class="r-label">status</div>
+                  <div class="r-value" id="g-t2i-status">--</div>
+                </div>
+                <div class="r-field" style="border:none;padding:4px 0">
+                  <div class="r-label">image size</div>
+                  <div class="r-value" id="g-t2i-size">--</div>
+                </div>
+                <div class="r-field" style="border:none;padding:4px 0">
+                  <div class="r-label">latency</div>
+                  <div class="r-value" id="g-t2i-latency">--</div>
+                </div>
+              </div>
+              <!-- Policy column -->
+              <div style="border:1px solid var(--border);border-radius:6px;padding:12px">
+                <div style="font-size:10px;font-weight:700;text-transform:uppercase;color:var(--txt2);margin-bottom:8px">
+                  Action Policy (DROID)
+                </div>
+                <div class="r-field" style="border:none;padding:4px 0">
+                  <div class="r-label">status</div>
+                  <div class="r-value" id="g-policy-status">--</div>
+                </div>
+                <div class="r-field" style="border:none;padding:4px 0">
+                  <div class="r-label">action chunk</div>
+                  <div class="r-value" id="g-policy-chunk">--</div>
+                </div>
+                <div class="r-field" style="border:none;padding:4px 0">
+                  <div class="r-label">smoothness</div>
+                  <div class="r-value" id="g-policy-smooth">--</div>
+                </div>
+                <div class="r-field" style="border:none;padding:4px 0">
+                  <div class="r-label">latency</div>
+                  <div class="r-value" id="g-policy-latency">--</div>
+                </div>
+              </div>
             </div>
-            <div class="r-field">
-              <div class="r-label">image size</div>
-              <div class="r-value" id="g-t2i-size">--</div>
-            </div>
-            <div class="r-field">
-              <div class="r-label">T2I latency</div>
-              <div class="r-value" id="g-t2i-latency">--</div>
-            </div>
-            <div class="r-field" style="border-top: 2px solid var(--border); margin-top: 4px; padding-top: 10px;">
-              <div class="r-label">Action Policy</div>
-              <div class="r-value" id="g-policy-status">--</div>
-            </div>
-            <div class="r-field">
-              <div class="r-label">action chunk</div>
-              <div class="r-value" id="g-policy-chunk">--</div>
-            </div>
-            <div class="r-field">
-              <div class="r-label">smoothness</div>
-              <div class="r-value" id="g-policy-smooth">--</div>
-            </div>
-            <div class="r-field">
-              <div class="r-label">policy latency</div>
-              <div class="r-value" id="g-policy-latency">--</div>
-            </div>
-            <div class="r-field" style="border-top: 2px solid var(--border); margin-top: 4px; padding-top: 10px;">
-              <div class="r-label">curation</div>
-              <div class="r-value" id="g-curation">--</div>
+            <!-- Curation verdict bar -->
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:var(--card2);border-radius:6px">
+              <div style="display:flex;align-items:center;gap:8px">
+                <span style="font-size:10px;font-weight:700;text-transform:uppercase;color:var(--txt2)">Curation</span>
+                <span id="g-curation">--</span>
+              </div>
+              <div class="annotation" style="font-size:10px">
+                On-device quality gate &mdash; rejected episodes never leave Thor
+              </div>
             </div>
           </div>
         </div>
@@ -1180,6 +1207,9 @@ data:
         ph.style.display  = 'none';
         document.getElementById('scene-name').textContent = lat.scene.replace(/_/g,' ');
         document.getElementById('scene-tag').textContent  = lat.scene;
+        if (lat.scene_description) {
+          document.getElementById('scene-prompt').textContent = '"' + lat.scene_description + '"';
+        }
       }
 
       // Generator output (D031)
