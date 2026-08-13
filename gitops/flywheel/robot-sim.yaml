@@ -166,6 +166,11 @@ data:
                 img_bytes = base64.b64decode(b64_data) if b64_data else b""
                 latency_ms = round((time.monotonic() - t0) * 1000, 1)
 
+                # Save the generated image so the dashboard can display it
+                gen_img_path = EPISODE_DIR.parent / "latest_generated.png"
+                if img_bytes:
+                    gen_img_path.write_bytes(img_bytes)
+
                 if span:
                     span.set_attribute("gen.status", "ok")
                     span.set_attribute("gen.latency_ms", latency_ms)

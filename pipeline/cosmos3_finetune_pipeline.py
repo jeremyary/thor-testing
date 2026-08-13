@@ -669,14 +669,13 @@ def package_modelcar(
     out_dir        = pathlib.Path(image_ref_out.path)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Install crane (go-containerregistry) -- the gcr.io/go-containerregistry/crane
-    # image has no shell so KFP can't use it as a base. Install the binary here.
-    import urllib.request, platform, stat
-    arch = "arm64" if platform.machine() == "aarch64" else "x86_64"
-    crane_url = f"https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_{arch}.tar.gz"
-    print(f"[package] installing crane from {crane_url}")
-    urllib.request.urlretrieve(crane_url, "/tmp/crane.tar.gz")
-    subprocess.run(["tar", "-xzf", "/tmp/crane.tar.gz", "-C", "/usr/local/bin", "crane"], check=True)
+    # Install crane binary (apt-get curl first since python:3.12-slim doesn't have it)
+    print("[package] installing crane...")
+    subprocess.run(["sh", "-c", "apt-get update -qq && apt-get install -y -qq curl > /dev/null 2>&1"], check=True)
+    subprocess.run([
+        "sh", "-c",
+        "curl -sL https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz | tar -xzf - -C /usr/local/bin crane"
+    ], check=True)
 
     image_ref = f"{registry}/{image_name}:{model_version}"
     print(f"[package] building modelcar -> {image_ref}")
@@ -735,13 +734,15 @@ def sign_modelcar(
     meta      = json.loads((art_dir / "image_ref.json").read_text())
     image_ref = meta["image_ref"]
 
-    # Install cosign binary
-    import urllib.request, platform, stat
+    # Install cosign binary (apt-get curl first, then download cosign)
+    import platform
     arch = "amd64" if platform.machine() == "x86_64" else "arm64"
-    cosign_url = f"https://github.com/sigstore/cosign/releases/download/v2.6.5/cosign-linux-{arch}"
-    print(f"[sign] installing cosign from {cosign_url}")
-    urllib.request.urlretrieve(cosign_url, "/usr/local/bin/cosign")
-    os.chmod("/usr/local/bin/cosign", 0o755)
+    print(f"[sign] installing cosign for {arch}...")
+    subprocess.run(["sh", "-c", "apt-get update -qq && apt-get install -y -qq curl > /dev/null 2>&1"], check=True)
+    subprocess.run([
+        "sh", "-c",
+        f"curl -sL https://github.com/sigstore/cosign/releases/download/v2.6.5/cosign-linux-{arch} -o /usr/local/bin/cosign && chmod +x /usr/local/bin/cosign"
+    ], check=True)
 
     print(f"[sign] cosign sign {image_ref}")
     env = os.environ.copy()
