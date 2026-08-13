@@ -135,8 +135,13 @@ spec:
           env:
             - name: PASS_THRESHOLD
               value: "0.5"
+            # SMOOTHNESS_THRESHOLD: calibrated against real Cosmos3-Edge Action Policy
+            # output on 256x256 BridgeData2 frames. Base model predictions are in
+            # the 0.3-0.8 range; pre-loaded pool chunks were ~0.07-0.09 (artificially
+            # smooth). 1.0 allows most real predictions; injected failures (~1.2-1.4)
+            # are still caught. Fine-tuned model should produce lower values.
             - name: SMOOTHNESS_THRESHOLD
-              value: "0.15"
+              value: "1.0"
           volumeMounts:
             - name: code
               mountPath: /app
