@@ -9,23 +9,21 @@ data:
     # Cluster aliases
     clusters=edge,hub
 
-    # Edge Kafka (local, plaintext) — also used as Connect worker backing store
+    # Edge Kafka (local, plaintext)
     edge.bootstrap.servers=edge-kafka.flywheel.svc:9092
 
-    # Hub Kafka (external route, TLS, server-auth only, no client cert)
+    # Hub Kafka (external route, TLS, server-auth only)
     hub.bootstrap.servers=fleet-kafka-bootstrap-fleet-ops.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com:443
     hub.security.protocol=SSL
     hub.ssl.endpoint.identification.algorithm=
     hub.ssl.truststore.type=PEM
     hub.ssl.truststore.location=/certs/ca.crt
-    hub.admin.timeout.ms=30000
-    hub.request.timeout.ms=30000
-
-    # Use edge Kafka for Connect worker's internal coordination
-    # (offsets, config, status topics). Without this, Connect tries to
-    # create admin clients for ALL clusters at startup, and the hub
-    # admin client's default timeout may be too short.
-    dedicated.mode.enabled=false
+    # Generous timeouts for cross-network TLS connection to hub
+    hub.admin.timeout.ms=60000
+    hub.request.timeout.ms=60000
+    hub.connections.max.idle.ms=540000
+    hub.default.api.timeout.ms=120000
+    hub.metadata.max.age.ms=300000
 
     # Replication: edge -> hub only
     edge->hub.enabled=true
@@ -34,7 +32,7 @@ data:
     # Topics to replicate
     edge->hub.topics=episode-manifests
 
-    # Don't rename topics (strip the source prefix)
+    # Don't rename topics
     replication.policy.class=org.apache.kafka.connect.mirror.IdentityReplicationPolicy
 
     # Replication config
@@ -42,18 +40,17 @@ data:
     heartbeats.topic.replication.factor=1
     checkpoints.topic.replication.factor=1
 
-    # Consumer/producer tuning for edge
+    # Consumer/producer tuning
     tasks.max=1
     replication.factor=1
     sync.topic.configs.enabled=false
     sync.topic.acls.enabled=false
-    refresh.topics.interval.seconds=30
-    refresh.groups.interval.seconds=30
-    emit.heartbeats.interval.seconds=30
+    refresh.topics.interval.seconds=60
+    refresh.groups.interval.seconds=60
+    emit.heartbeats.interval.seconds=60
 
-    # Admin client timeouts (generous for cross-network hub connection)
-    admin.timeout.ms=30000
-    connections.max.idle.ms=540000
+    # Speed up Connect plugin loading (avoid 30s reflection scan)
+    plugin.discovery=service_load
 ---
 apiVersion: apps/v1
 kind: Deployment
