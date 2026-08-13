@@ -123,21 +123,27 @@ data:
         log.info(f"Connecting to Kafka at {KAFKA_BOOTSTRAP}, topic={EPISODE_TOPIC}, "
                  f"threshold={TRIGGER_THRESHOLD}")
 
-        consumer = CConsumer({
+        # Auto-detect protocol from port: 9092=PLAINTEXT, 9093+=SSL
+        use_ssl = not KAFKA_BOOTSTRAP.endswith(":9092")
+        proto   = "SSL" if use_ssl else "PLAINTEXT"
+        log.info(f"Protocol: {proto}")
+
+        kafka_conf = {
             "bootstrap.servers":  KAFKA_BOOTSTRAP,
-            "security.protocol":  "SSL",
-            "ssl.ca.location":    KAFKA_CA_FILE,
+            "security.protocol":  proto,
+        }
+        if use_ssl:
+            kafka_conf["ssl.ca.location"] = KAFKA_CA_FILE
+
+        consumer = CConsumer({
+            **kafka_conf,
             "group.id":           CONSUMER_GROUP,
             "auto.offset.reset":  "earliest",
             "enable.auto.commit": True,
         })
         consumer.subscribe([EPISODE_TOPIC])
 
-        producer = CProducer({
-            "bootstrap.servers":  KAFKA_BOOTSTRAP,
-            "security.protocol":  "SSL",
-            "ssl.ca.location":    KAFKA_CA_FILE,
-        })
+        producer = CProducer(kafka_conf)
 
         pending    = []
         run_number = 0
@@ -207,8 +213,11 @@ spec:
             - -c
             - pip install -q confluent-kafka && python /app/consumer.py
           env:
+            # Use the plaintext listener (port 9092) for cluster-internal access.
+            # The TLS listener (9093) requires mTLS client certificates which the
+            # consumer SA doesn't have. Plain is fine for intra-cluster traffic.
             - name: KAFKA_BOOTSTRAP
-              value: "fleet-kafka-bootstrap.fleet-ops.svc:9093"
+              value: "fleet-kafka-bootstrap.fleet-ops.svc:9092"
             - name: KAFKA_CA_FILE
               value: "/certs/ca.crt"
             - name: EPISODE_TOPIC
