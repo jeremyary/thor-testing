@@ -46,6 +46,7 @@ from kfp import dsl
 from kfp.kubernetes import (
     add_pod_label,
     add_toleration,
+    empty_dir_mount,
     mount_pvc,
     use_secret_as_volume,
 )
@@ -811,6 +812,15 @@ def cosmos3_finetune_pipeline(
     mount_pvc(finetune_task,
               pvc_name="finetune-scratch",
               mount_path="/scratch")
+    # The PyTorch DataLoader workers use /dev/shm for shared-memory tensor
+    # passing. The KFP pod's default /dev/shm is 64MB, which OOMs the video
+    # dataloader ("unable to allocate shared memory"). Mount a memory-backed
+    # emptyDir at /dev/shm (matches the validated probe pod's 16Gi dshm).
+    empty_dir_mount(finetune_task,
+                    volume_name="dshm",
+                    mount_path="/dev/shm",
+                    medium="Memory",
+                    size_limit="16Gi")
     # D032-A: finetune needs large memory for cosmos-framework
     finetune_task.set_memory_request("48Gi").set_memory_limit("60Gi")
     finetune_task.set_cpu_request("6").set_cpu_limit("8")

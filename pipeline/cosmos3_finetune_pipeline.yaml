@@ -994,6 +994,11 @@ platforms:
     deploymentSpec:
       executors:
         exec-finetune-cosmos3:
+          emptyDirMounts:
+          - medium: Memory
+            mountPath: /dev/shm
+            sizeLimit: 16Gi
+            volumeName: dshm
           podMetadata:
             labels:
               kueue.x-k8s.io/queue-name: robotics-train
