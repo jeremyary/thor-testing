@@ -564,6 +564,25 @@ def package_modelcar(
             t.extract("crane", path=str(bindir))
         crane.chmod(0o755)
 
+    # Authenticate crane to the internal registry using the pod's SA token.
+    # pipeline-runner-dspa was granted system:image-builder on thor-builds.
+    # crane reads $DOCKER_CONFIG/config.json -- write it directly rather than
+    # `crane auth login` (which writes to $HOME/.docker, and HOME=/ is read-only
+    # under restricted-v2).
+    import base64 as _b64
+    sa_token = pathlib.Path(
+        "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    ).read_text().strip()
+    docker_cfg_dir = pathlib.Path("/tmp/dockercfg")
+    docker_cfg_dir.mkdir(parents=True, exist_ok=True)
+    auth = _b64.b64encode(f"pipeline-runner-dspa:{sa_token}".encode()).decode()
+    (docker_cfg_dir / "config.json").write_text(json.dumps({
+        "auths": {registry: {"auth": auth}}
+    }))
+    crane_env = os.environ.copy()
+    crane_env["DOCKER_CONFIG"] = str(docker_cfg_dir)
+    print("[package] configured crane registry auth (SA token)")
+
     image_ref = f"{registry}/{image_name}:{model_version}"
     print(f"[package] building modelcar -> {image_ref}")
 
@@ -583,14 +602,14 @@ def package_modelcar(
         "--base", "registry.access.redhat.com/ubi9/ubi-micro:latest",
         "--new_layer", layer_tar,
         "--new_tag", image_ref,
-    ], check=True)
+    ], check=True, env=crane_env)
 
     os.unlink(layer_tar)
 
     # Resolve by digest (per D014 convention)
     result = subprocess.run(
         [str(crane), "digest", image_ref],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, check=True, env=crane_env,
     )
     digest = result.stdout.strip()
     image_ref_by_digest = f"{registry}/{image_name}@{digest}"
@@ -634,9 +653,24 @@ def sign_modelcar(
         urllib.request.urlretrieve(url, str(cosign))
         cosign.chmod(0o755)
 
+    # cosign pushes the signature to the registry -- authenticate first via a
+    # docker config the pod's SA token, written to a writable DOCKER_CONFIG dir.
+    import base64 as _b64
+    registry_host = image_ref.split("/")[0]
+    sa_token = pathlib.Path(
+        "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    ).read_text().strip()
+    docker_cfg_dir = pathlib.Path("/tmp/dockercfg")
+    docker_cfg_dir.mkdir(parents=True, exist_ok=True)
+    auth = _b64.b64encode(f"pipeline-runner-dspa:{sa_token}".encode()).decode()
+    (docker_cfg_dir / "config.json").write_text(json.dumps({
+        "auths": {registry_host: {"auth": auth}}
+    }))
+
     print(f"[sign] cosign sign {image_ref}")
     env = os.environ.copy()
     env["COSIGN_PASSWORD"] = ""  # key is unencrypted in the Secret (matches D008)
+    env["DOCKER_CONFIG"] = str(docker_cfg_dir)
     subprocess.run([
         str(cosign), "sign",
         "--key",        cosign_key_path,

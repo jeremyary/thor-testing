@@ -733,7 +733,19 @@ deploymentSpec:
           \n               \"go-containerregistry_Linux_x86_64.tar.gz\")\n       \
           \ tgz = \"/tmp/crane.tar.gz\"\n        urllib.request.urlretrieve(url, tgz)\n\
           \        with tarfile.open(tgz) as t:\n            t.extract(\"crane\",\
-          \ path=str(bindir))\n        crane.chmod(0o755)\n\n    image_ref = f\"{registry}/{image_name}:{model_version}\"\
+          \ path=str(bindir))\n        crane.chmod(0o755)\n\n    # Authenticate crane\
+          \ to the internal registry using the pod's SA token.\n    # pipeline-runner-dspa\
+          \ was granted system:image-builder on thor-builds.\n    # crane reads $DOCKER_CONFIG/config.json\
+          \ -- write it directly rather than\n    # `crane auth login` (which writes\
+          \ to $HOME/.docker, and HOME=/ is read-only\n    # under restricted-v2).\n\
+          \    import base64 as _b64\n    sa_token = pathlib.Path(\n        \"/var/run/secrets/kubernetes.io/serviceaccount/token\"\
+          \n    ).read_text().strip()\n    docker_cfg_dir = pathlib.Path(\"/tmp/dockercfg\"\
+          )\n    docker_cfg_dir.mkdir(parents=True, exist_ok=True)\n    auth = _b64.b64encode(f\"\
+          pipeline-runner-dspa:{sa_token}\".encode()).decode()\n    (docker_cfg_dir\
+          \ / \"config.json\").write_text(json.dumps({\n        \"auths\": {registry:\
+          \ {\"auth\": auth}}\n    }))\n    crane_env = os.environ.copy()\n    crane_env[\"\
+          DOCKER_CONFIG\"] = str(docker_cfg_dir)\n    print(\"[package] configured\
+          \ crane registry auth (SA token)\")\n\n    image_ref = f\"{registry}/{image_name}:{model_version}\"\
           \n    print(f\"[package] building modelcar -> {image_ref}\")\n\n    # Create\
           \ a tar of the checkpoint directory to append as a layer\n    with tempfile.NamedTemporaryFile(suffix=\"\
           .tar\", delete=False) as tmp:\n        layer_tar = tmp.name\n\n    subprocess.run([\n\
@@ -742,14 +754,15 @@ deploymentSpec:
           \ base=ubi9-micro, one layer = checkpoint tar\n    subprocess.run([\n  \
           \      str(crane), \"append\",\n        \"--base\", \"registry.access.redhat.com/ubi9/ubi-micro:latest\"\
           ,\n        \"--new_layer\", layer_tar,\n        \"--new_tag\", image_ref,\n\
-          \    ], check=True)\n\n    os.unlink(layer_tar)\n\n    # Resolve by digest\
-          \ (per D014 convention)\n    result = subprocess.run(\n        [str(crane),\
-          \ \"digest\", image_ref],\n        capture_output=True, text=True, check=True,\n\
-          \    )\n    digest = result.stdout.strip()\n    image_ref_by_digest = f\"\
-          {registry}/{image_name}@{digest}\"\n    print(f\"[package] pushed -> {image_ref_by_digest}\"\
-          )\n\n    meta = {\"image_ref\": image_ref_by_digest, \"tag\": image_ref,\
-          \ \"digest\": digest}\n    (out_dir / \"image_ref.json\").write_text(json.dumps(meta))\n\
-          \    return image_ref_by_digest\n\n"
+          \    ], check=True, env=crane_env)\n\n    os.unlink(layer_tar)\n\n    #\
+          \ Resolve by digest (per D014 convention)\n    result = subprocess.run(\n\
+          \        [str(crane), \"digest\", image_ref],\n        capture_output=True,\
+          \ text=True, check=True, env=crane_env,\n    )\n    digest = result.stdout.strip()\n\
+          \    image_ref_by_digest = f\"{registry}/{image_name}@{digest}\"\n    print(f\"\
+          [package] pushed -> {image_ref_by_digest}\")\n\n    meta = {\"image_ref\"\
+          : image_ref_by_digest, \"tag\": image_ref, \"digest\": digest}\n    (out_dir\
+          \ / \"image_ref.json\").write_text(json.dumps(meta))\n    return image_ref_by_digest\n\
+          \n"
         image: python:3.12-slim
     exec-sign-modelcar:
       container:
@@ -793,13 +806,22 @@ deploymentSpec:
           \    cosign = bindir / \"cosign\"\n    if not cosign.exists():\n       \
           \ url = f\"https://github.com/sigstore/cosign/releases/download/v2.6.5/cosign-linux-{arch}\"\
           \n        urllib.request.urlretrieve(url, str(cosign))\n        cosign.chmod(0o755)\n\
-          \n    print(f\"[sign] cosign sign {image_ref}\")\n    env = os.environ.copy()\n\
-          \    env[\"COSIGN_PASSWORD\"] = \"\"  # key is unencrypted in the Secret\
-          \ (matches D008)\n    subprocess.run([\n        str(cosign), \"sign\",\n\
-          \        \"--key\",        cosign_key_path,\n        \"--rekor-url\",  rekor_url,\n\
-          \        \"--tlog-upload=true\",\n        \"-y\",\n        image_ref,\n\
-          \    ], check=True, env=env)\n    print(f\"[sign] signed -> Rekor entry\
-          \ logged\")\n    return image_ref\n\n"
+          \n    # cosign pushes the signature to the registry -- authenticate first\
+          \ via a\n    # docker config the pod's SA token, written to a writable DOCKER_CONFIG\
+          \ dir.\n    import base64 as _b64\n    registry_host = image_ref.split(\"\
+          /\")[0]\n    sa_token = pathlib.Path(\n        \"/var/run/secrets/kubernetes.io/serviceaccount/token\"\
+          \n    ).read_text().strip()\n    docker_cfg_dir = pathlib.Path(\"/tmp/dockercfg\"\
+          )\n    docker_cfg_dir.mkdir(parents=True, exist_ok=True)\n    auth = _b64.b64encode(f\"\
+          pipeline-runner-dspa:{sa_token}\".encode()).decode()\n    (docker_cfg_dir\
+          \ / \"config.json\").write_text(json.dumps({\n        \"auths\": {registry_host:\
+          \ {\"auth\": auth}}\n    }))\n\n    print(f\"[sign] cosign sign {image_ref}\"\
+          )\n    env = os.environ.copy()\n    env[\"COSIGN_PASSWORD\"] = \"\"  # key\
+          \ is unencrypted in the Secret (matches D008)\n    env[\"DOCKER_CONFIG\"\
+          ] = str(docker_cfg_dir)\n    subprocess.run([\n        str(cosign), \"sign\"\
+          ,\n        \"--key\",        cosign_key_path,\n        \"--rekor-url\",\
+          \  rekor_url,\n        \"--tlog-upload=true\",\n        \"-y\",\n      \
+          \  image_ref,\n    ], check=True, env=env)\n    print(f\"[sign] signed ->\
+          \ Rekor entry logged\")\n    return image_ref\n\n"
         image: python:3.12-slim
 pipelineInfo:
   description: 'Phase 4 training pipeline: download BridgeData2 -> Vision SFT fine-tune
