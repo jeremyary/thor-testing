@@ -166,13 +166,23 @@ def finetune_cosmos3(
 
     # -----------------------------------------------------------------------
     # Step 1: Setup -- writable HOME, ffprobe, clone cosmos-framework
+    # /scratch is a persistent PVC reused across runs: the venv, model DCP, and
+    # cosmos-framework clone are cached (guarded by exists() checks below) to
+    # speed up subsequent runs. But training OUTPUTS must be fresh each run so a
+    # stale checkpoint from a failed prior run can't be mistaken for this run's
+    # result -- clear the run output dir up front.
     # -----------------------------------------------------------------------
+    import shutil as _shutil
     scratch = pathlib.Path("/scratch")
     scratch.mkdir(exist_ok=True)
     home = scratch / "home"
     home.mkdir(exist_ok=True)
     hf_home = scratch / "hf"
     hf_home.mkdir(exist_ok=True)
+    stale_run = scratch / "outputs" / "train" / "cosmos3" / "sft" / "vision_sft_edge"
+    if stale_run.exists():
+        print(f"[finetune] clearing stale run output: {stale_run}")
+        _shutil.rmtree(stale_run, ignore_errors=True)
 
     env = os.environ.copy()
     env.update({
@@ -186,17 +196,19 @@ def finetune_cosmos3(
     subprocess.run([sys.executable, "-m", "pip", "install", "--user", "uv"],
                    env=env, check=True, capture_output=True)
 
-    # Install ffprobe (static build -- can't apt-get as non-root in OpenShift)
+    # Install ffmpeg + ffprobe (static build -- can't apt-get as non-root in
+    # OpenShift). The cosmos-framework video dataloader shells out to BOTH:
+    # ffprobe for metadata and ffmpeg for decoding the .mp4 clips.
     ffbin = scratch / "bin"
     ffbin.mkdir(exist_ok=True)
-    if not (ffbin / "ffprobe").exists():
-        print("[finetune] installing static ffprobe...")
+    if not (ffbin / "ffmpeg").exists() or not (ffbin / "ffprobe").exists():
+        print("[finetune] installing static ffmpeg + ffprobe...")
         subprocess.run([
             "sh", "-c",
             f"curl -sL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz "
             f"-o {scratch}/ff.tar.xz && "
             f"tar xf {scratch}/ff.tar.xz -C {scratch} && "
-            f"cp {scratch}/ffmpeg-*-amd64-static/ffprobe {ffbin}/"
+            f"cp {scratch}/ffmpeg-*-amd64-static/ffmpeg {scratch}/ffmpeg-*-amd64-static/ffprobe {ffbin}/"
         ], env=env, check=True)
 
     # Clone cosmos-framework at pinned SHA
@@ -787,10 +799,18 @@ def cosmos3_finetune_pipeline(
     # Tolerate the GPU node taint: nvidia.com/gpu=L40S_SHARED:NoSchedule
     add_toleration(finetune_task, key="nvidia.com/gpu", value="L40S_SHARED",
                    effect="NoSchedule", operator="Equal")
-    # Mount the pre-staged dataset PVC (finetune reads it directly)
+    # Mount the pre-staged dataset PVC (finetune reads it directly, read-only)
     mount_pvc(finetune_task,
               pvc_name="bridgedata2-dataset",
               mount_path="/dataset")
+    # Mount a dedicated scratch PVC at /scratch -- cosmos-framework needs ~20GB
+    # writable space (venv 6GB + model 12GB + DCP checkpoint 8GB + outputs).
+    # The container root filesystem is read-only under restricted-v2 SCC, so
+    # /scratch MUST be a backed volume. fsGroup is auto-applied by the SCC,
+    # making the EBS volume group-writable by the pod's UID.
+    mount_pvc(finetune_task,
+              pvc_name="finetune-scratch",
+              mount_path="/scratch")
     # D032-A: finetune needs large memory for cosmos-framework
     finetune_task.set_memory_request("48Gi").set_memory_limit("60Gi")
     finetune_task.set_cpu_request("6").set_cpu_limit("8")

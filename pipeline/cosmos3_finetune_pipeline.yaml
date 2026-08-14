@@ -317,28 +317,39 @@ deploymentSpec:
           \ dataset={dataset_path} clips={train_count} max_steps={max_steps}\")\n\n\
           \    # -----------------------------------------------------------------------\n\
           \    # Step 1: Setup -- writable HOME, ffprobe, clone cosmos-framework\n\
-          \    # -----------------------------------------------------------------------\n\
-          \    scratch = pathlib.Path(\"/scratch\")\n    scratch.mkdir(exist_ok=True)\n\
-          \    home = scratch / \"home\"\n    home.mkdir(exist_ok=True)\n    hf_home\
-          \ = scratch / \"hf\"\n    hf_home.mkdir(exist_ok=True)\n\n    env = os.environ.copy()\n\
-          \    env.update({\n        \"HOME\":   str(home),\n        \"HF_HOME\":\
-          \ str(hf_home),\n        \"PATH\":   f\"{scratch}/bin:{home}/.local/bin:{env.get('PATH',\
+          \    # /scratch is a persistent PVC reused across runs: the venv, model\
+          \ DCP, and\n    # cosmos-framework clone are cached (guarded by exists()\
+          \ checks below) to\n    # speed up subsequent runs. But training OUTPUTS\
+          \ must be fresh each run so a\n    # stale checkpoint from a failed prior\
+          \ run can't be mistaken for this run's\n    # result -- clear the run output\
+          \ dir up front.\n    # -----------------------------------------------------------------------\n\
+          \    import shutil as _shutil\n    scratch = pathlib.Path(\"/scratch\")\n\
+          \    scratch.mkdir(exist_ok=True)\n    home = scratch / \"home\"\n    home.mkdir(exist_ok=True)\n\
+          \    hf_home = scratch / \"hf\"\n    hf_home.mkdir(exist_ok=True)\n    stale_run\
+          \ = scratch / \"outputs\" / \"train\" / \"cosmos3\" / \"sft\" / \"vision_sft_edge\"\
+          \n    if stale_run.exists():\n        print(f\"[finetune] clearing stale\
+          \ run output: {stale_run}\")\n        _shutil.rmtree(stale_run, ignore_errors=True)\n\
+          \n    env = os.environ.copy()\n    env.update({\n        \"HOME\":   str(home),\n\
+          \        \"HF_HOME\": str(hf_home),\n        \"PATH\":   f\"{scratch}/bin:{home}/.local/bin:{env.get('PATH',\
           \ '')}\",\n        \"PYTORCH_ALLOC_CONF\": \"expandable_segments:True\"\
           ,  # D032-A memory fix\n    })\n\n    # Install uv\n    subprocess.run([sys.executable,\
           \ \"-m\", \"pip\", \"install\", \"--user\", \"uv\"],\n                 \
-          \  env=env, check=True, capture_output=True)\n\n    # Install ffprobe (static\
-          \ build -- can't apt-get as non-root in OpenShift)\n    ffbin = scratch\
-          \ / \"bin\"\n    ffbin.mkdir(exist_ok=True)\n    if not (ffbin / \"ffprobe\"\
-          ).exists():\n        print(\"[finetune] installing static ffprobe...\")\n\
-          \        subprocess.run([\n            \"sh\", \"-c\",\n            f\"\
-          curl -sL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz\
+          \  env=env, check=True, capture_output=True)\n\n    # Install ffmpeg + ffprobe\
+          \ (static build -- can't apt-get as non-root in\n    # OpenShift). The cosmos-framework\
+          \ video dataloader shells out to BOTH:\n    # ffprobe for metadata and ffmpeg\
+          \ for decoding the .mp4 clips.\n    ffbin = scratch / \"bin\"\n    ffbin.mkdir(exist_ok=True)\n\
+          \    if not (ffbin / \"ffmpeg\").exists() or not (ffbin / \"ffprobe\").exists():\n\
+          \        print(\"[finetune] installing static ffmpeg + ffprobe...\")\n \
+          \       subprocess.run([\n            \"sh\", \"-c\",\n            f\"curl\
+          \ -sL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz\
           \ \"\n            f\"-o {scratch}/ff.tar.xz && \"\n            f\"tar xf\
-          \ {scratch}/ff.tar.xz -C {scratch} && \"\n            f\"cp {scratch}/ffmpeg-*-amd64-static/ffprobe\
-          \ {ffbin}/\"\n        ], env=env, check=True)\n\n    # Clone cosmos-framework\
-          \ at pinned SHA\n    cf_sha = \"b28c027628db987d8eaa558faedc1d37d11125ae\"\
-          \n    cf_dir = scratch / \"cosmos-framework\"\n    if not cf_dir.exists():\n\
-          \        print(f\"[finetune] cloning cosmos-framework @ {cf_sha[:12]}...\"\
-          )\n        subprocess.run([\n            \"git\", \"clone\", \"https://github.com/NVIDIA/cosmos-framework.git\"\
+          \ {scratch}/ff.tar.xz -C {scratch} && \"\n            f\"cp {scratch}/ffmpeg-*-amd64-static/ffmpeg\
+          \ {scratch}/ffmpeg-*-amd64-static/ffprobe {ffbin}/\"\n        ], env=env,\
+          \ check=True)\n\n    # Clone cosmos-framework at pinned SHA\n    cf_sha\
+          \ = \"b28c027628db987d8eaa558faedc1d37d11125ae\"\n    cf_dir = scratch /\
+          \ \"cosmos-framework\"\n    if not cf_dir.exists():\n        print(f\"[finetune]\
+          \ cloning cosmos-framework @ {cf_sha[:12]}...\")\n        subprocess.run([\n\
+          \            \"git\", \"clone\", \"https://github.com/NVIDIA/cosmos-framework.git\"\
           ,\n            str(cf_dir),\n        ], env=env, check=True, capture_output=True)\n\
           \        subprocess.run([\"git\", \"checkout\", cf_sha],\n             \
           \          cwd=str(cf_dir), env=env, check=True, capture_output=True)\n\n\
@@ -992,6 +1003,11 @@ platforms:
             pvcNameParameter:
               runtimeValue:
                 constant: bridgedata2-dataset
+          - constant: finetune-scratch
+            mountPath: /scratch
+            pvcNameParameter:
+              runtimeValue:
+                constant: finetune-scratch
           tolerations:
           - effect: NoSchedule
             key: nvidia.com/gpu
