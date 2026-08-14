@@ -548,13 +548,21 @@ def package_modelcar(
     out_dir        = pathlib.Path(image_ref_out.path)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Install crane binary (apt-get curl first since python:3.12-slim doesn't have it)
-    print("[package] installing crane...")
-    subprocess.run(["sh", "-c", "apt-get update -qq && apt-get install -y -qq curl > /dev/null 2>&1"], check=True)
-    subprocess.run([
-        "sh", "-c",
-        "curl -sL https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz | tar -xzf - -C /usr/local/bin crane"
-    ], check=True)
+    # Download crane via urllib into a writable dir -- the KFP pod runs as a
+    # non-root UID under restricted-v2 (no apt-get, /usr/local/bin read-only).
+    import urllib.request, tarfile
+    print("[package] downloading crane...")
+    bindir = pathlib.Path("/tmp/bin")
+    bindir.mkdir(parents=True, exist_ok=True)
+    crane = bindir / "crane"
+    if not crane.exists():
+        url = ("https://github.com/google/go-containerregistry/releases/latest/download/"
+               "go-containerregistry_Linux_x86_64.tar.gz")
+        tgz = "/tmp/crane.tar.gz"
+        urllib.request.urlretrieve(url, tgz)
+        with tarfile.open(tgz) as t:
+            t.extract("crane", path=str(bindir))
+        crane.chmod(0o755)
 
     image_ref = f"{registry}/{image_name}:{model_version}"
     print(f"[package] building modelcar -> {image_ref}")
@@ -571,7 +579,7 @@ def package_modelcar(
 
     # crane append: base=ubi9-micro, one layer = checkpoint tar
     subprocess.run([
-        "crane", "append",
+        str(crane), "append",
         "--base", "registry.access.redhat.com/ubi9/ubi-micro:latest",
         "--new_layer", layer_tar,
         "--new_tag", image_ref,
@@ -581,7 +589,7 @@ def package_modelcar(
 
     # Resolve by digest (per D014 convention)
     result = subprocess.run(
-        ["crane", "digest", image_ref],
+        [str(crane), "digest", image_ref],
         capture_output=True, text=True, check=True,
     )
     digest = result.stdout.strip()
@@ -613,21 +621,24 @@ def sign_modelcar(
     meta      = json.loads((art_dir / "image_ref.json").read_text())
     image_ref = meta["image_ref"]
 
-    # Install cosign binary (apt-get curl first, then download cosign)
-    import platform
+    # Download cosign via urllib into a writable dir -- non-root UID under
+    # restricted-v2 SCC (no apt-get, /usr/local/bin read-only).
+    import platform, urllib.request
     arch = "amd64" if platform.machine() == "x86_64" else "arm64"
-    print(f"[sign] installing cosign for {arch}...")
-    subprocess.run(["sh", "-c", "apt-get update -qq && apt-get install -y -qq curl > /dev/null 2>&1"], check=True)
-    subprocess.run([
-        "sh", "-c",
-        f"curl -sL https://github.com/sigstore/cosign/releases/download/v2.6.5/cosign-linux-{arch} -o /usr/local/bin/cosign && chmod +x /usr/local/bin/cosign"
-    ], check=True)
+    print(f"[sign] downloading cosign for {arch}...")
+    bindir = pathlib.Path("/tmp/bin")
+    bindir.mkdir(parents=True, exist_ok=True)
+    cosign = bindir / "cosign"
+    if not cosign.exists():
+        url = f"https://github.com/sigstore/cosign/releases/download/v2.6.5/cosign-linux-{arch}"
+        urllib.request.urlretrieve(url, str(cosign))
+        cosign.chmod(0o755)
 
     print(f"[sign] cosign sign {image_ref}")
     env = os.environ.copy()
     env["COSIGN_PASSWORD"] = ""  # key is unencrypted in the Secret (matches D008)
     subprocess.run([
-        "cosign", "sign",
+        str(cosign), "sign",
         "--key",        cosign_key_path,
         "--rekor-url",  rekor_url,
         "--tlog-upload=true",

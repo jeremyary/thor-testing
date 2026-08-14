@@ -724,24 +724,27 @@ deploymentSpec:
           \ layer is appended on top.\n    \"\"\"\n    import subprocess, pathlib,\
           \ json, os, tempfile\n\n    checkpoint_dir = pathlib.Path(checkpoint.path)\n\
           \    out_dir        = pathlib.Path(image_ref_out.path)\n    out_dir.mkdir(parents=True,\
-          \ exist_ok=True)\n\n    # Install crane binary (apt-get curl first since\
-          \ python:3.12-slim doesn't have it)\n    print(\"[package] installing crane...\"\
-          )\n    subprocess.run([\"sh\", \"-c\", \"apt-get update -qq && apt-get install\
-          \ -y -qq curl > /dev/null 2>&1\"], check=True)\n    subprocess.run([\n \
-          \       \"sh\", \"-c\",\n        \"curl -sL https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz\
-          \ | tar -xzf - -C /usr/local/bin crane\"\n    ], check=True)\n\n    image_ref\
-          \ = f\"{registry}/{image_name}:{model_version}\"\n    print(f\"[package]\
-          \ building modelcar -> {image_ref}\")\n\n    # Create a tar of the checkpoint\
-          \ directory to append as a layer\n    with tempfile.NamedTemporaryFile(suffix=\"\
+          \ exist_ok=True)\n\n    # Download crane via urllib into a writable dir\
+          \ -- the KFP pod runs as a\n    # non-root UID under restricted-v2 (no apt-get,\
+          \ /usr/local/bin read-only).\n    import urllib.request, tarfile\n    print(\"\
+          [package] downloading crane...\")\n    bindir = pathlib.Path(\"/tmp/bin\"\
+          )\n    bindir.mkdir(parents=True, exist_ok=True)\n    crane = bindir / \"\
+          crane\"\n    if not crane.exists():\n        url = (\"https://github.com/google/go-containerregistry/releases/latest/download/\"\
+          \n               \"go-containerregistry_Linux_x86_64.tar.gz\")\n       \
+          \ tgz = \"/tmp/crane.tar.gz\"\n        urllib.request.urlretrieve(url, tgz)\n\
+          \        with tarfile.open(tgz) as t:\n            t.extract(\"crane\",\
+          \ path=str(bindir))\n        crane.chmod(0o755)\n\n    image_ref = f\"{registry}/{image_name}:{model_version}\"\
+          \n    print(f\"[package] building modelcar -> {image_ref}\")\n\n    # Create\
+          \ a tar of the checkpoint directory to append as a layer\n    with tempfile.NamedTemporaryFile(suffix=\"\
           .tar\", delete=False) as tmp:\n        layer_tar = tmp.name\n\n    subprocess.run([\n\
           \        \"tar\", \"-cf\", layer_tar,\n        \"-C\", str(checkpoint_dir.parent),\n\
           \        checkpoint_dir.name,\n    ], check=True)\n\n    # crane append:\
           \ base=ubi9-micro, one layer = checkpoint tar\n    subprocess.run([\n  \
-          \      \"crane\", \"append\",\n        \"--base\", \"registry.access.redhat.com/ubi9/ubi-micro:latest\"\
+          \      str(crane), \"append\",\n        \"--base\", \"registry.access.redhat.com/ubi9/ubi-micro:latest\"\
           ,\n        \"--new_layer\", layer_tar,\n        \"--new_tag\", image_ref,\n\
           \    ], check=True)\n\n    os.unlink(layer_tar)\n\n    # Resolve by digest\
-          \ (per D014 convention)\n    result = subprocess.run(\n        [\"crane\"\
-          , \"digest\", image_ref],\n        capture_output=True, text=True, check=True,\n\
+          \ (per D014 convention)\n    result = subprocess.run(\n        [str(crane),\
+          \ \"digest\", image_ref],\n        capture_output=True, text=True, check=True,\n\
           \    )\n    digest = result.stdout.strip()\n    image_ref_by_digest = f\"\
           {registry}/{image_name}@{digest}\"\n    print(f\"[package] pushed -> {image_ref_by_digest}\"\
           )\n\n    meta = {\"image_ref\": image_ref_by_digest, \"tag\": image_ref,\
@@ -781,17 +784,18 @@ deploymentSpec:
           \ static keypair + RHTAS\n    Rekor as the Tekton OS-image pipeline (D008/D022).\"\
           \"\"\n    import subprocess, pathlib, json, os\n\n    art_dir   = pathlib.Path(image_ref_artifact.path)\n\
           \    meta      = json.loads((art_dir / \"image_ref.json\").read_text())\n\
-          \    image_ref = meta[\"image_ref\"]\n\n    # Install cosign binary (apt-get\
-          \ curl first, then download cosign)\n    import platform\n    arch = \"\
-          amd64\" if platform.machine() == \"x86_64\" else \"arm64\"\n    print(f\"\
-          [sign] installing cosign for {arch}...\")\n    subprocess.run([\"sh\", \"\
-          -c\", \"apt-get update -qq && apt-get install -y -qq curl > /dev/null 2>&1\"\
-          ], check=True)\n    subprocess.run([\n        \"sh\", \"-c\",\n        f\"\
-          curl -sL https://github.com/sigstore/cosign/releases/download/v2.6.5/cosign-linux-{arch}\
-          \ -o /usr/local/bin/cosign && chmod +x /usr/local/bin/cosign\"\n    ], check=True)\n\
+          \    image_ref = meta[\"image_ref\"]\n\n    # Download cosign via urllib\
+          \ into a writable dir -- non-root UID under\n    # restricted-v2 SCC (no\
+          \ apt-get, /usr/local/bin read-only).\n    import platform, urllib.request\n\
+          \    arch = \"amd64\" if platform.machine() == \"x86_64\" else \"arm64\"\
+          \n    print(f\"[sign] downloading cosign for {arch}...\")\n    bindir =\
+          \ pathlib.Path(\"/tmp/bin\")\n    bindir.mkdir(parents=True, exist_ok=True)\n\
+          \    cosign = bindir / \"cosign\"\n    if not cosign.exists():\n       \
+          \ url = f\"https://github.com/sigstore/cosign/releases/download/v2.6.5/cosign-linux-{arch}\"\
+          \n        urllib.request.urlretrieve(url, str(cosign))\n        cosign.chmod(0o755)\n\
           \n    print(f\"[sign] cosign sign {image_ref}\")\n    env = os.environ.copy()\n\
           \    env[\"COSIGN_PASSWORD\"] = \"\"  # key is unencrypted in the Secret\
-          \ (matches D008)\n    subprocess.run([\n        \"cosign\", \"sign\",\n\
+          \ (matches D008)\n    subprocess.run([\n        str(cosign), \"sign\",\n\
           \        \"--key\",        cosign_key_path,\n        \"--rekor-url\",  rekor_url,\n\
           \        \"--tlog-upload=true\",\n        \"-y\",\n        image_ref,\n\
           \    ], check=True, env=env)\n    print(f\"[sign] signed -> Rekor entry\
