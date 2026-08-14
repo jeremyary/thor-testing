@@ -448,12 +448,13 @@ data:
                 "frame_path":        f"{scene_name}.jpg",
                 "model_version":     MODEL_VERSION,
                 "has_failure":       has_failure,
-                # Generation quality signals
+                # Generation quality signals (I2V, D032-C)
                 "generation": {
                     "status":       t2i_result.get("status", "error"),
                     "image_size":   t2i_result.get("image_size_bytes", 0),
                     "latency_ms":   t2i_result.get("latency_ms", 0),
                     "error":        t2i_result.get("error", ""),
+                    "type":         t2i_result.get("type", "i2v"),
                 },
                 # Action policy signals
                 "policy": {
