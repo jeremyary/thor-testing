@@ -67,7 +67,7 @@ metadata:
   name: mirrormaker2
   namespace: flywheel
 spec:
-  replicas: 0
+  replicas: 1
   selector:
     matchLabels:
       app: mirrormaker2

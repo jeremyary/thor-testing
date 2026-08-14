@@ -119,7 +119,7 @@ metadata:
   name: curator
   namespace: flywheel
 spec:
-  replicas: 0
+  replicas: 1
   selector:
     matchLabels:
       app: curator
