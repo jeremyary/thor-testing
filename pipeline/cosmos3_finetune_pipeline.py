@@ -1,39 +1,38 @@
-"""cosmos3_finetune_pipeline.py -- KFP v2 training pipeline (redesigned per D030).
+"""cosmos3_finetune_pipeline.py -- KFP v2 training pipeline (redesigned per D032).
 
 Stages
 ------
-1. ingest        -- pull curated episodes from MinIO, convert to Reasoner SFT JSONL
-2. finetune      -- cosmos-framework Reasoner SFT on Cosmos3-Edge (Kueue-admitted L40S)
-3. evaluate      -- Gate 1: reasoning quality metrics vs thresholds
+1. ingest        -- pull curated episodes from MinIO, convert to Vision SFT JSONL
+2. finetune      -- cosmos-framework Vision SFT on Cosmos3-Edge (Kueue-admitted L40S)
+3. evaluate      -- Gate 1: training loss vs threshold
 4. package       -- crane append checkpoint into a signed modelcar OCI artifact
 5. sign          -- cosign sign modelcar + log to RHTAS Rekor
 6. promote       -- open a PR against the GitOps repo updating deployment-green.yaml
 
-Design (D030-A)
----------------
-The fine-tune target is the Cosmos3-Edge REASONER (Nemotron-2B-Dense-VL), NOT
-the DROID action policy. Rationale:
+Design (D032-A, supersedes D030-A/D031)
+---------------------------------------
+The fine-tune target is the Cosmos3-Edge GENERATOR (4B MoT) via cosmos-framework's
+Vision SFT recipe (launch_sft_vision_edge.sh). Empirically confirmed on a single
+L40S (g6e.2xlarge, 45GB GPU) on 2026-08-14:
 
-  DROID policy post-training requires 758 GB nvidia/Cosmos3-DROID dataset +
-  8-GPU HSDP -- incompatible with the single L40S (g6e.2xlarge) available.
-  Policy training is explicitly deferred as a 'real arm' future milestone (D030-D).
+  - 10 training iterations completed, loss 2.45 -> 3.13, ~11.5s/iter
+  - Peak GPU ~39GB of 45GB (fits with headroom)
+  - Checkpoint saved to DCP -> exported to HuggingFace safetensors
 
-The Reasoner SFT:
-  - Uses cosmos-framework's videophy2_edge recipe pattern
-  - Loads weights directly from nvidia/Cosmos3-Edge (no DCP conversion step)
-  - Trains the 2B Nemotron LM with vision tower FROZEN
-  - Input: (scene_image, instruction) -> (reasoning + action_selection) JSONL pairs
-  - Base image: nvcr.io/nvidia/pytorch:26.06-py3 with cosmos-framework installed
-  - Feasible on single L40S (48GB) with gradient checkpointing + NPROC_PER_NODE=1
+Memory knobs (quality-neutral):
+  - PYTORCH_ALLOC_CONF=expandable_segments:True (fragmentation fix)
+  - max_num_tokens_after_packing: 45056 -> 24576 (fewer clips per micro-batch)
 
-The fine-tuning improves:
-  - Reasoning validity (structured JSON output rate)
-  - Action selection quality (choosing physically-plausible action chunks)
-  - Confidence calibration (confidence scores match actual quality)
+The recipe trains only 5 generation-pathway param groups (moe_gen, time_embedder,
+vae2llm, llm2vae, k_norm_und_for_gen) with full activation checkpointing + bf16.
 
-These improvements are directly measurable from the curated episode metrics
-(avg_confidence, avg_smoothness, good_selections) and visible in the Perses
-dashboard's model.version step-change panel.
+Data format: BridgeData2 video clips + structured JSON captions
+  (nvidia/BridgeData2-Subset-Synthetic-Captions JSONL format).
+
+Environment: nvcr.io/nvidia/pytorch:26.06-py3 + cosmos-framework installed via
+  uv sync --all-extras --group=cu130-train (torch 2.10+cu130).
+  ffprobe must be on PATH (static build for non-root OpenShift).
+  OpenShift fsGroup: 0 on PVC securityContext.
 
 Usage
 -----
@@ -52,384 +51,294 @@ from kfp.kubernetes import (
 
 
 # ---------------------------------------------------------------------------
-# Component: ingest
+# Component: ingest -- download BridgeData2 Vision SFT dataset from HuggingFace
 # ---------------------------------------------------------------------------
 @dsl.component(
     base_image="python:3.12-slim",
-    packages_to_install=["boto3==1.35.0"],
+    packages_to_install=["huggingface_hub==0.30.0"],
 )
 def ingest_episodes(
-    s3_endpoint:   str,
-    s3_bucket:     str,
-    s3_access_key: str,
-    s3_secret_key: str,
-    train_split:   float = 0.8,
+    hf_dataset:    str = "nvidia/BridgeData2-Subset-Synthetic-Captions",
+    hf_revision:   str = "40d018ac1c1a2a4b9734f17fdb21f3d933c49a01",
+    hf_token_path: str = "/etc/hf/HF_TOKEN",
+    # Kept for API compatibility with the pipeline wiring; unused now
+    s3_endpoint:   str = "",
+    s3_bucket:     str = "",
+    s3_access_key: str = "",
+    s3_secret_key: str = "",
     episodes_out:  dsl.Output[dsl.Dataset] = None,
 ) -> int:
-    """Download curated episodes from MinIO; convert to cosmos-framework Reasoner SFT JSONL.
+    """Download the BridgeData2 Vision SFT dataset from HuggingFace Hub (D032-D).
 
-    cosmos-framework Reasoner SFT expects JSONL where each line is a conversation
-    record in the Qwen3-VL VLM format:
-      {
-        "conversations": [
-          {"from": "human",    "value": "<image>\\nScene: <desc>. Choose action strategy."},
-          {"from": "assistant", "value": "<JSON reasoning output>"}
-        ],
-        "image": "<base64-encoded-frame-or-path>"  # optional; text-only if absent
-      }
+    cosmos-framework Vision SFT (launch_sft_vision_edge.sh) expects the dataset at
+    DATASET_PATH pointing to a directory containing:
+      train/video_dataset_file.jsonl  -- each line: {uuid, vision_path, caption_json, ...}
+      train/videos/*.mp4             -- BridgeData2 robot manipulation clips (256x256, 5fps)
 
-    Each curated episode contributes one training example per tick where the
-    reasoning was valid (valid=True in tick_data[i].reasoning). The target output
-    is the Reasoner's structured JSON (action_strategy, confidence, reasoning,
-    select_action) -- exactly what the model should improve at producing.
+    The JSONL format uses structured caption_json (subjects, actions, background,
+    cinematography) which is the model's native prompt format. This component
+    downloads the dataset directly from nvidia/BridgeData2-Subset-Synthetic-Captions
+    on HuggingFace Hub.
     """
-    import boto3, json, pathlib, hashlib, random
+    import pathlib, os
 
-    s3 = boto3.client(
-        "s3",
-        endpoint_url          = s3_endpoint,
-        aws_access_key_id     = s3_access_key,
-        aws_secret_access_key = s3_secret_key,
-    )
     out = pathlib.Path(episodes_out.path)
-    train_jsonl = out / "train" / "sft_data.jsonl"
-    val_jsonl   = out / "val"   / "sft_data.jsonl"
-    (out / "train").mkdir(parents=True, exist_ok=True)
-    (out / "val").mkdir(parents=True, exist_ok=True)
+    dataset_dir = out / "sft_dataset_bridge"
+    dataset_dir.mkdir(parents=True, exist_ok=True)
 
-    paginator = s3.get_paginator("list_objects_v2")
-    seen_ids  = set()
-    all_eps   = []
+    # Read HF token if available (raises rate limits)
+    token = None
+    token_path = pathlib.Path(hf_token_path)
+    if token_path.exists():
+        token = token_path.read_text().strip()
+    elif os.environ.get("HF_TOKEN"):
+        token = os.environ["HF_TOKEN"]
 
-    for page in paginator.paginate(Bucket=s3_bucket):
-        for obj in page.get("Contents", []):
-            key = obj["Key"]
-            if not key.endswith(".json"):
-                continue
-            body = s3.get_object(Bucket=s3_bucket, Key=key)["Body"].read()
-            ep   = json.loads(body)
-            eid  = ep.get("episode_id", hashlib.md5(body).hexdigest()[:12])
-            if eid in seen_ids:
-                continue
-            seen_ids.add(eid)
-            # Only keep episodes that passed curation and have valid reasoning
-            if ep.get("curation_verdict") != "pass":
-                continue
-            all_eps.append((eid, ep))
+    from huggingface_hub import snapshot_download
 
-    random.shuffle(all_eps)
-    split_idx = int(len(all_eps) * train_split)
-
-    def ep_to_sft_examples(ep: dict) -> list[dict]:
-        """Convert one episode's valid ticks to VLM SFT conversation records."""
-        scene_name = ep.get("scene", "")
-        scene_desc = ep.get("scene_description", scene_name)
-        records    = []
-        for tick in ep.get("tick_data", []):
-            r = tick.get("reasoning", {})
-            if not r.get("valid"):
-                continue
-            # Build target assistant output (the reasoning the model produced
-            # and should learn to produce more reliably)
-            target = json.dumps({
-                "action_strategy": r.get("action_strategy", ""),
-                "confidence":      round(float(r.get("confidence", 0.5)), 3),
-                "reasoning":       r.get("reasoning", ""),
-                "select_action":   r.get("select_action", "good"),
-            })
-            records.append({
-                "conversations": [
-                    {
-                        "from":  "human",
-                        "value": (
-                            f"Scene: {scene_desc}\n\n"
-                            "You are a robot arm controller. Examine the scene and "
-                            "determine the appropriate action strategy. Output "
-                            "structured JSON with keys: action_strategy, confidence "
-                            "(0.0-1.0), reasoning (1-2 sentences), select_action "
-                            "('good' or 'bad').\nRespond with JSON only."
-                        ),
-                    },
-                    {"from": "assistant", "value": target},
-                ],
-                # frame_path is relative -- the training script resolves it from
-                # the dataset root. Include as a hint; text-only fallback if absent.
-                "frame_path": ep.get("frame_path", ""),
-                "episode_id": ep.get("episode_id", ""),
-                "model_version": ep.get("model_version", ""),
-            })
-        return records
-
-    train_records = []
-    val_records   = []
-    for i, (eid, ep) in enumerate(all_eps):
-        recs = ep_to_sft_examples(ep)
-        if i < split_idx:
-            train_records.extend(recs)
-        else:
-            val_records.extend(recs)
-
-    train_jsonl.write_text("\n".join(json.dumps(r) for r in train_records))
-    val_jsonl.write_text(  "\n".join(json.dumps(r) for r in val_records))
-
-    print(
-        f"[ingest] episodes={len(all_eps)} "
-        f"train_examples={len(train_records)} val_examples={len(val_records)}"
+    print(f"[ingest] downloading {hf_dataset} @ {hf_revision[:12]}...")
+    snapshot_download(
+        repo_id=hf_dataset,
+        repo_type="dataset",
+        revision=hf_revision,
+        local_dir=str(out),
+        token=token,
     )
-    return len(train_records)
+
+    # Verify the required files exist
+    jsonl_path = dataset_dir / "train" / "video_dataset_file.jsonl"
+    videos_dir = dataset_dir / "train" / "videos"
+
+    if not jsonl_path.exists():
+        # Handle case where dataset is at the root of the download
+        alt_jsonl = out / "sft_dataset_bridge" / "train" / "video_dataset_file.jsonl"
+        if alt_jsonl.exists():
+            jsonl_path = alt_jsonl
+
+    assert jsonl_path.exists(), f"JSONL not found at {jsonl_path}"
+
+    line_count = sum(1 for _ in jsonl_path.open())
+    video_count = len(list(videos_dir.glob("*.mp4"))) if videos_dir.exists() else 0
+    print(f"[ingest] dataset ready: {line_count} clips, {video_count} videos")
+    return line_count
 
 
 # ---------------------------------------------------------------------------
-# Component: finetune -- cosmos-framework Reasoner SFT (GPU, Kueue-admitted)
+# Component: finetune -- cosmos-framework Vision SFT (GPU, Kueue-admitted)
 # ---------------------------------------------------------------------------
 @dsl.component(
-    # NVIDIA's recommended base for cosmos-framework training (from cosmos-framework README).
-    # Contains PyTorch + CUDA 13.0, matching the L40S driver stack on this OSD cluster.
-    # cosmos-framework is installed at runtime from GitHub (pinned tag) to avoid baking
-    # a 20GB image while still getting a reproducible framework version.
+    # NVIDIA's recommended base for cosmos-framework training.
+    # Contains PyTorch 2.10 + CUDA 13.0, matching the L40S driver stack.
+    # cosmos-framework is cloned + uv-synced at runtime from GitHub (pinned SHA)
+    # to avoid baking a 20GB image while getting a reproducible environment.
     base_image="nvcr.io/nvidia/pytorch:26.06-py3",
     packages_to_install=[],
 )
 def finetune_cosmos3(
     episodes:       dsl.Input[dsl.Dataset],
     model_id:       str   = "nvidia/Cosmos3-Edge",
-    max_steps:      int   = 50,       # 50 for live demo run; 2000+ for real convergence
-    learning_rate:  float = 5e-5,     # conservative for 2B model on single GPU
+    max_steps:      int   = 100,      # 100 for demo (~19 min on L40S); 500 for full
     checkpoint_out: dsl.Output[dsl.Model] = None,
 ) -> float:
-    """Cosmos3-Edge Reasoner SFT via cosmos-framework (D030-A).
+    """Cosmos3-Edge Vision SFT via cosmos-framework (D032-A).
 
-    Fine-tunes the Cosmos3-Edge Reasoner (Nemotron-2B-Dense-VL) on curated
-    (scene, reasoning) pairs from the physical AI flywheel.
+    Fine-tunes the Cosmos3-Edge Generator (4B MoT) on BridgeData2 video clips
+    with structured captions using NVIDIA's real launch_sft_vision_edge.sh recipe.
 
-    Framework: NVIDIA/cosmos-framework, videophy2_edge recipe pattern.
-    - Loads weights from nvidia/Cosmos3-Edge directly (no DCP conversion).
-    - Vision tower FROZEN; projector + LM weights train.
-    - Task type: VLM (vlm) -- text-in, text-out reasoning.
-    - Single-GPU: NPROC_PER_NODE=1 with activation checkpointing.
+    Empirically confirmed on single L40S (45GB) on 2026-08-14:
+      - 10 iters: loss 2.45-3.13, ~11.5s/iter, peak GPU ~39GB
+      - Memory knobs: expandable_segments + max_tokens 24576
 
-    For demo: max_steps=50 completes in ~5-8 min on L40S. The Gate 1 eval uses
-    lenient thresholds so a short run always passes, letting the pipeline run
-    end-to-end and produce a real (minimally-trained) checkpoint + PR.
-
-    For real improvement: max_steps >= 500 recommended for visible quality gains
-    on the reasoning/selection metrics.
+    Framework: NVIDIA/cosmos-framework (SHA b28c027)
+    Recipe: examples/launch_sft_vision_edge.sh (vision_sft_edge.toml)
+    Data: BridgeData2 video clips + structured JSON captions (JSONL)
+    Install: uv sync --all-extras --group=cu130-train (torch 2.10+cu130)
     """
-    import subprocess, pathlib, json, os, sys, shutil
+    import subprocess, pathlib, json, os, sys, re
 
-    train_jsonl = pathlib.Path(episodes.path) / "train" / "sft_data.jsonl"
-    val_jsonl   = pathlib.Path(episodes.path) / "val"   / "sft_data.jsonl"
-    out_dir     = pathlib.Path(checkpoint_out.path)
+    out_dir = pathlib.Path(checkpoint_out.path)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    train_count = sum(1 for _ in train_jsonl.open()) if train_jsonl.exists() else 0
-    val_count   = sum(1 for _ in val_jsonl.open())   if val_jsonl.exists()   else 0
-    print(f"[finetune] train={train_count} val={val_count} examples, max_steps={max_steps}")
-
-    if train_count == 0:
-        print("[finetune] WARNING: no training examples -- writing zero-step meta and exiting")
-        meta = {"model_id": model_id, "max_steps": 0, "train_count": 0,
-                "val_count": val_count, "final_loss": 0.0, "framework": "cosmos-framework"}
+    # Locate the dataset (downloaded by ingest_episodes)
+    data_root = pathlib.Path(episodes.path)
+    jsonl_candidates = list(data_root.rglob("video_dataset_file.jsonl"))
+    if not jsonl_candidates:
+        print("[finetune] ERROR: no video_dataset_file.jsonl found in dataset")
+        meta = {"model_id": model_id, "max_steps": 0, "final_loss": 0.0,
+                "error": "no JSONL", "decision": "D032-A"}
         (out_dir / "training_meta.json").write_text(json.dumps(meta, indent=2))
         return 0.0
 
-    # -----------------------------------------------------------------------
-    # Step 1: Install cosmos-framework from GitHub (pinned to HEAD SHA).
-    # The repo has no releases or tags as of 2026-08-13; pinning to a specific
-    # commit SHA ensures reproducibility. Update this SHA when the upstream
-    # repo stabilises or adds versioned releases (D030 note: check
-    # github.com/NVIDIA/cosmos-framework/tags before each real training run).
-    # -----------------------------------------------------------------------
-    cf_sha = "b28c027628db987d8eaa558faedc1d37d11125ae"  # main@2026-08-13
-    print(f"[finetune] Installing cosmos-framework @ {cf_sha[:12]}...")
-    subprocess.run([
-        sys.executable, "-m", "pip", "install", "--quiet",
-        f"git+https://github.com/NVIDIA/cosmos-framework.git@{cf_sha}"
-        "#egg=cosmos_framework[cu130-train]",
-    ], check=True)
+    # DATASET_PATH should be the parent of train/ (the sft_dataset_bridge dir)
+    dataset_path = jsonl_candidates[0].parent.parent  # train/.. -> sft_dataset_bridge
+    train_count = sum(1 for _ in jsonl_candidates[0].open())
+    print(f"[finetune] dataset={dataset_path} clips={train_count} max_steps={max_steps}")
 
     # -----------------------------------------------------------------------
-    # Step 2: Convert nvidia/Cosmos3-Edge HF checkpoint to DCP format
-    # (cosmos-framework videophy2_edge recipe skips DCP conversion for Edge --
-    # it loads reasoner weights directly from the HF snapshot. Confirmed in
-    # cosmos-framework/docs/training.md: "weights load directly from
-    # nvidia/Cosmos3-Edge -- no conversion step and no required weights env var")
+    # Step 1: Setup -- writable HOME, ffprobe, clone cosmos-framework
     # -----------------------------------------------------------------------
-    hf_cache   = pathlib.Path("/tmp/hf_cache")
-    hf_cache.mkdir(parents=True, exist_ok=True)
-    run_dir    = pathlib.Path("/tmp/cosmos_run")
-    run_dir.mkdir(parents=True, exist_ok=True)
-    data_dir   = pathlib.Path("/tmp/cosmos_data")
-    data_dir.mkdir(parents=True, exist_ok=True)
+    scratch = pathlib.Path("/scratch")
+    scratch.mkdir(exist_ok=True)
+    home = scratch / "home"
+    home.mkdir(exist_ok=True)
+    hf_home = scratch / "hf"
+    hf_home.mkdir(exist_ok=True)
 
-    # Copy our JSONL into the expected dataset layout
-    # cosmos-framework expects the dataset path to contain the JSONL directly
-    shutil.copy(train_jsonl, data_dir / "train.jsonl")
-    if val_jsonl.exists():
-        shutil.copy(val_jsonl, data_dir / "val.jsonl")
-
-    # -----------------------------------------------------------------------
-    # Step 3: Write a minimal SFT TOML config for the Edge Reasoner recipe
-    # Mirrors the structure of examples/toml/sft_config/videophy2_edge.toml
-    # but uses our flywheel dataset and single-GPU parallelism.
-    # -----------------------------------------------------------------------
-    toml_content = f"""
-[job]
-task        = "vlm"
-experiment  = "reasoner_sft_edge_flywheel"
-project     = "cosmos3"
-group       = "sft"
-name        = "flywheel_reasoner"
-wandb_mode  = "disabled"
-
-[model]
-attn_implementation = "flash_attention_2"
-
-[model.parallelism]
-data_parallel_shard_degree     = 1   # single GPU
-data_parallel_replicate_degree = 1
-context_parallel_shard_degree  = 1
-
-[model.activation_checkpointing]
-mode = "full"   # required for 2B on single 48GB GPU
-
-[model.compile]
-enabled = false  # disable torch.compile on first run for stability
-
-[optimizer]
-lr     = {learning_rate}
-betas  = [0.9, 0.95]
-weight_decay = 0.01
-
-[scheduler]
-cycle_lengths  = [{max_steps}]
-warm_up_steps  = [{min(max_steps // 10, 5)}]
-f_start        = 0.01
-f_max          = 1.0
-f_min          = 0.1
-
-[trainer]
-max_iter              = {max_steps}
-grad_accum_iter       = 4
-logging_iter          = 10
-distributed_parallelism = "fsdp"
-
-[trainer.callbacks.grad_clip]
-clip_norm    = 1.0
-force_finite = false
-
-[checkpoint]
-load_path = "{model_id}"  # loads directly from HF Hub (no DCP conversion for Edge)
-save_iter = {max(max_steps, 50)}
-
-[dataloader_train]
-max_sequence_length = 2048
-seed = 42
-"""
-    toml_path = pathlib.Path("/tmp/flywheel_sft.toml")
-    toml_path.write_text(toml_content)
-
-    # -----------------------------------------------------------------------
-    # Step 4: Register a minimal experiment config for our flywheel dataset.
-    # cosmos-framework's VLM training loader is configured via the experiment
-    # Python file. We write a minimal one that points to our JSONL.
-    # -----------------------------------------------------------------------
-    experiment_py = f"""
-import pathlib
-from cosmos_framework.configs.base.config import TrainConfig
-
-def get_config(cfg: TrainConfig) -> TrainConfig:
-    # Minimal VLM dataloader config pointing to our flywheel JSONL
-    cfg.dataloader_train.dataloader.datasets = {{
-        "flywheel": {{
-            "_target_": "cosmos_framework.data.vlm.dataset.JSONLDataset",
-            "dataset": {{
-                "jsonl_path": "{data_dir}/train.jsonl",
-            }},
-        }}
-    }}
-    return cfg
-"""
-    exp_dir = pathlib.Path(
-        subprocess.check_output(
-            [sys.executable, "-c",
-             "import cosmos_framework; import pathlib; "
-             "p = pathlib.Path(cosmos_framework.__file__).parent / "
-             "'configs/base/experiment/sft'; print(p)"],
-            text=True
-        ).strip()
-    )
-    exp_dir.mkdir(parents=True, exist_ok=True)
-    (exp_dir / "reasoner_sft_edge_flywheel.py").write_text(experiment_py)
-
-    # -----------------------------------------------------------------------
-    # Step 5: Run training
-    # -----------------------------------------------------------------------
     env = os.environ.copy()
     env.update({
-        "HF_HOME":                    str(hf_cache),
-        "IMAGINAIRE_OUTPUT_ROOT":     str(run_dir),
-        "NPROC_PER_NODE":             "1",
-        "CUDA_VISIBLE_DEVICES":       "0",
-        "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1",
+        "HOME":   str(home),
+        "HF_HOME": str(hf_home),
+        "PATH":   f"{scratch}/bin:{home}/.local/bin:{env.get('PATH', '')}",
+        "PYTORCH_ALLOC_CONF": "expandable_segments:True",  # D032-A memory fix
     })
 
-    cmd = [
-        "torchrun", "--nproc_per_node=1",
-        "-m", "cosmos_framework.scripts.train",
-        f"--sft-toml={toml_path}",
-    ]
-    print(f"[finetune] Running: {' '.join(cmd)}", flush=True)
-    result = subprocess.run(cmd, env=env, cwd="/tmp")
-    if result.returncode != 0:
-        print(f"[finetune] Training exited with code {result.returncode} -- "
-              "checking for partial checkpoint...")
+    # Install uv
+    subprocess.run([sys.executable, "-m", "pip", "install", "--user", "uv"],
+                   env=env, check=True, capture_output=True)
+
+    # Install ffprobe (static build -- can't apt-get as non-root in OpenShift)
+    ffbin = scratch / "bin"
+    ffbin.mkdir(exist_ok=True)
+    if not (ffbin / "ffprobe").exists():
+        print("[finetune] installing static ffprobe...")
+        subprocess.run([
+            "sh", "-c",
+            f"curl -sL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz "
+            f"-o {scratch}/ff.tar.xz && "
+            f"tar xf {scratch}/ff.tar.xz -C {scratch} && "
+            f"cp {scratch}/ffmpeg-*-amd64-static/ffprobe {ffbin}/"
+        ], env=env, check=True)
+
+    # Clone cosmos-framework at pinned SHA
+    cf_sha = "b28c027628db987d8eaa558faedc1d37d11125ae"
+    cf_dir = scratch / "cosmos-framework"
+    if not cf_dir.exists():
+        print(f"[finetune] cloning cosmos-framework @ {cf_sha[:12]}...")
+        subprocess.run([
+            "git", "clone", "https://github.com/NVIDIA/cosmos-framework.git",
+            str(cf_dir),
+        ], env=env, check=True, capture_output=True)
+        subprocess.run(["git", "checkout", cf_sha],
+                       cwd=str(cf_dir), env=env, check=True, capture_output=True)
 
     # -----------------------------------------------------------------------
-    # Step 6: Export checkpoint to HuggingFace safetensors
-    # cosmos-framework export_model produces a self-contained safetensors dir
-    # that vLLM-Omni loads via --checkpoint-path.
+    # Step 2: Install dependencies (uv sync -- documented, tested combo)
+    # Must use cu130-train (NOT cu130-torch213-train -- torchvision mismatch)
     # -----------------------------------------------------------------------
-    run_subdir = run_dir / "cosmos3" / "sft" / "flywheel_reasoner"
+    uv_bin = f"{home}/.local/bin/uv"
+    if not (cf_dir / ".venv").exists():
+        print("[finetune] uv sync --all-extras --group=cu130-train ...")
+        subprocess.run([
+            uv_bin, "sync", "--all-extras", "--group=cu130-train",
+        ], cwd=str(cf_dir), env=env, check=True, capture_output=True)
+
+    # -----------------------------------------------------------------------
+    # Step 3: Convert HF checkpoint to DCP (required for Vision SFT)
+    # -----------------------------------------------------------------------
+    dcp_dir = cf_dir / "examples" / "checkpoints" / "Cosmos3-Edge"
+    if not dcp_dir.exists():
+        print("[finetune] converting Cosmos3-Edge HF -> DCP ...")
+        subprocess.run([
+            uv_bin, "run", "python", "-m",
+            "cosmos_framework.scripts.convert_model_to_dcp",
+            "-o", str(dcp_dir),
+            "--checkpoint-path", "Cosmos3-Edge",
+        ], cwd=str(cf_dir), env=env, check=True)
+
+    # Wan2.2 VAE is auto-downloaded by the converter; find it
+    vae_candidates = list(pathlib.Path(hf_home).rglob("Wan2.2_VAE.pth"))
+    assert vae_candidates, "Wan2.2 VAE not found in HF cache after DCP conversion"
+    wan_vae_path = str(vae_candidates[0])
+
+    # -----------------------------------------------------------------------
+    # Step 4: Patch the TOML recipe for single-L40S (D032-A memory knobs)
+    # -----------------------------------------------------------------------
+    toml_path = cf_dir / "examples" / "toml" / "sft_config" / "vision_sft_edge.toml"
+    toml_text = toml_path.read_text()
+    # Reduce packing cap: 45056 -> 24576 (fits 39/45GB instead of OOM)
+    toml_text = toml_text.replace(
+        "max_num_tokens_after_packing = 45056",
+        "max_num_tokens_after_packing = 24576",
+    )
+    toml_text = toml_text.replace(
+        "max_sequence_length = 45056",
+        "max_sequence_length = 24576",
+    )
+    # Set max_iter and save_iter to user's requested steps
+    toml_text = re.sub(r"max_iter\s*=\s*\d+", f"max_iter                = {max_steps}", toml_text)
+    toml_text = re.sub(r"save_iter\s*=\s*\d+", f"save_iter            = {max_steps}", toml_text)
+    toml_path.write_text(toml_text)
+
+    # -----------------------------------------------------------------------
+    # Step 5: Run training via the real launch_sft_vision_edge.sh
+    # -----------------------------------------------------------------------
+    train_env = env.copy()
+    train_env.update({
+        "DATASET_PATH":         str(dataset_path),
+        "BASE_CHECKPOINT_PATH": str(dcp_dir),
+        "WAN_VAE_PATH":         wan_vae_path,
+        "NPROC_PER_NODE":       "1",
+        "IMAGINAIRE_OUTPUT_ROOT": str(scratch / "outputs" / "train"),
+    })
+    # Activate the venv so torchrun resolves to the correct python
+    venv_bin = str(cf_dir / ".venv" / "bin")
+    train_env["PATH"] = f"{ffbin}:{venv_bin}:{train_env['PATH']}"
+    # Ensure VIRTUAL_ENV is set so the launcher finds everything
+    train_env["VIRTUAL_ENV"] = str(cf_dir / ".venv")
+
+    print(f"[finetune] launching Vision SFT: max_steps={max_steps}, NPROC=1")
+    result = subprocess.run(
+        ["bash", "examples/launch_sft_vision_edge.sh"],
+        cwd=str(cf_dir), env=train_env,
+    )
+    if result.returncode != 0:
+        print(f"[finetune] training exit code {result.returncode} -- checking checkpoint...")
+
+    # -----------------------------------------------------------------------
+    # Step 6: Export DCP checkpoint to HuggingFace safetensors
+    # -----------------------------------------------------------------------
+    run_subdir = scratch / "outputs" / "train" / "cosmos3" / "sft" / "vision_sft_edge"
     ckpt_ptr   = run_subdir / "checkpoints" / "latest_checkpoint.txt"
+    final_loss = 0.0
 
     if ckpt_ptr.exists():
-        ckpt_iter = ckpt_ptr.read_text().strip()
-        ckpt_path = run_subdir / "checkpoints" / ckpt_iter
-        config_f  = run_subdir / "config.yaml"
+        ckpt_iter   = ckpt_ptr.read_text().strip()
+        ckpt_path   = run_subdir / "checkpoints" / ckpt_iter
+        config_f    = run_subdir / "config.yaml"
         export_path = out_dir / "model"
-        print(f"[finetune] Exporting {ckpt_iter} -> {export_path}...")
+        print(f"[finetune] exporting {ckpt_iter} -> {export_path}...")
         subprocess.run([
-            sys.executable, "-m", "cosmos_framework.scripts.export_model",
+            uv_bin, "run", "python", "-m",
+            "cosmos_framework.scripts.export_model",
             "--checkpoint-path", str(ckpt_path),
             "--config-file",    str(config_f),
             "-o",               str(export_path),
-        ], env=env, check=True)
-        # Read training loss from wandb run or trainer log if available
-        log_file = run_subdir / "trainer" / "metrics.json"
-        final_loss = 0.0
-        if log_file.exists():
-            metrics    = json.loads(log_file.read_text())
-            final_loss = metrics.get("loss", 0.0)
+        ], cwd=str(cf_dir), env=train_env, check=True)
+
+        # Parse final loss from training log
+        train_log = list(run_subdir.rglob("*.log"))
+        if train_log:
+            for line in reversed(train_log[0].read_text().splitlines()):
+                m = re.search(r"Loss:\s*([\d.]+)", line)
+                if m:
+                    final_loss = float(m.group(1))
+                    break
     else:
-        # No checkpoint produced (e.g., max_steps=0 or training crashed before save)
-        print("[finetune] No checkpoint found -- copying base model as fallback export")
+        print("[finetune] no checkpoint found -- training failed")
         export_path = out_dir / "model"
         export_path.mkdir(parents=True, exist_ok=True)
-        final_loss  = 0.0
 
     meta = {
         "model_id":         model_id,
         "framework":        "cosmos-framework",
-        "recipe":           "reasoner_sft_edge (videophy2_edge pattern)",
+        "recipe":           "vision_sft_edge (launch_sft_vision_edge.sh)",
+        "cf_sha":           cf_sha,
         "max_steps":        max_steps,
-        "learning_rate":    learning_rate,
-        "train_examples":   train_count,
-        "val_examples":     val_count,
+        "max_tokens":       24576,
         "final_loss":       final_loss,
         "checkpoint_iter":  ckpt_ptr.read_text().strip() if ckpt_ptr.exists() else "none",
         "export_path":      str(export_path),
-        "decision":         "D030-A",
+        "decision":         "D032-A",
     }
     (out_dir / "training_meta.json").write_text(json.dumps(meta, indent=2))
     print(f"[finetune] done -- loss={final_loss:.4f} export={export_path}")
@@ -441,97 +350,54 @@ def get_config(cfg: TrainConfig) -> TrainConfig:
 # ---------------------------------------------------------------------------
 @dsl.component(
     base_image="python:3.12-slim",
-    packages_to_install=["boto3==1.35.0"],
 )
 def evaluate(
     checkpoint:              dsl.Input[dsl.Model],
     episodes:                dsl.Input[dsl.Dataset],
-    threshold_loss:          float = 999.0,  # lenient for demo; tighten for prod
-    threshold_parse_rate:    float = 0.0,    # min fraction of valid JSON reasoning
-    threshold_good_sel_rate: float = 0.0,    # min fraction of good action selections
+    threshold_loss:          float = 10.0,   # lenient for demo; tighten for prod
     report_out:              dsl.Output[dsl.Dataset] = None,
 ) -> str:
-    """Gate 1 evaluation -- reasoning quality metrics (D030-A).
+    """Gate 1 evaluation -- training loss check (D032-A).
 
-    Evaluates on val set JSONL produced by ingest_episodes.
-    Metrics scored:
-      - parse_rate: fraction of examples where reasoning JSON was structurally valid
-      - good_sel_rate: fraction where select_action == 'good'
-      - avg_confidence: mean confidence from structured output
-      - final_loss: from training_meta.json (0.0 if training did not converge)
+    Reads training_meta.json from the finetune step and checks:
+      - final_loss <= threshold_loss (training converged)
+      - checkpoint_iter != "none" (training produced a checkpoint)
 
-    Thresholds are lenient by default (demo run of 50 steps won't converge).
-    Tighten threshold_parse_rate=0.6, threshold_good_sel_rate=0.5 for prod.
+    For demo: threshold_loss=10.0 (always passes a real training run).
+    For production: tighten to ~3.0 for BridgeData2 Vision SFT.
     """
     import json, pathlib, sys
 
     checkpoint_dir = pathlib.Path(checkpoint.path)
-    val_jsonl      = pathlib.Path(episodes.path) / "val" / "sft_data.jsonl"
     out            = pathlib.Path(report_out.path)
     out.mkdir(parents=True, exist_ok=True)
 
     meta       = json.loads((checkpoint_dir / "training_meta.json").read_text())
     final_loss = meta.get("final_loss", 0.0)
+    ckpt_iter  = meta.get("checkpoint_iter", "none")
 
-    # Read val JSONL and score reasoning outputs
-    val_records = []
-    if val_jsonl.exists():
-        for line in val_jsonl.read_text().strip().split("\n"):
-            if line.strip():
-                try:
-                    val_records.append(json.loads(line))
-                except Exception:
-                    pass
-
-    valid_parses  = 0
-    good_sels     = 0
-    total_conf    = 0.0
-
-    for rec in val_records:
-        # The assistant turn is the structured reasoning JSON
-        turns  = rec.get("conversations", [])
-        target = next((t["value"] for t in turns if t.get("from") == "assistant"), "")
-        try:
-            d = json.loads(target)
-            valid_parses += 1
-            if d.get("select_action") == "good":
-                good_sels += 1
-            total_conf += float(d.get("confidence", 0.5))
-        except Exception:
-            pass
-
-    n            = max(len(val_records), 1)
-    parse_rate   = round(valid_parses / n, 4)
-    good_sel_rate = round(good_sels / max(valid_parses, 1), 4)
-    avg_conf     = round(total_conf / max(valid_parses, 1), 4)
-
-    loss_ok       = final_loss  <= threshold_loss
-    parse_ok      = parse_rate  >= threshold_parse_rate
-    good_sel_ok   = good_sel_rate >= threshold_good_sel_rate
-    gate1_pass    = loss_ok and parse_ok and good_sel_ok
+    loss_ok       = final_loss > 0 and final_loss <= threshold_loss
+    ckpt_ok       = ckpt_iter != "none"
+    gate1_pass    = loss_ok and ckpt_ok
 
     report = {
         "final_loss":          final_loss,
-        "val_examples":        len(val_records),
-        "parse_rate":          parse_rate,
-        "good_sel_rate":       good_sel_rate,
-        "avg_confidence":      avg_conf,
         "threshold_loss":      threshold_loss,
-        "threshold_parse_rate":    threshold_parse_rate,
-        "threshold_good_sel_rate": threshold_good_sel_rate,
         "loss_ok":             loss_ok,
-        "parse_ok":            parse_ok,
-        "good_sel_ok":         good_sel_ok,
+        "ckpt_ok":             ckpt_ok,
+        "checkpoint_iter":     ckpt_iter,
         "gate1_pass":          gate1_pass,
+        "max_steps":           meta.get("max_steps", 0),
+        "max_tokens":          meta.get("max_tokens", 24576),
+        "recipe":              meta.get("recipe", ""),
+        "cf_sha":              meta.get("cf_sha", ""),
         "framework":           meta.get("framework", "cosmos-framework"),
-        "checkpoint_iter":     meta.get("checkpoint_iter", "none"),
-        "decision":            "D030-A",
+        "decision":            "D032-A",
     }
     (out / "eval_report.json").write_text(json.dumps(report, indent=2))
     print(
-        f"[evaluate] Gate 1: loss={final_loss:.4f} "
-        f"parse_rate={parse_rate:.1%} good_sel={good_sel_rate:.1%} "
-        f"conf={avg_conf:.3f} -> {'PASS' if gate1_pass else 'FAIL'}"
+        f"[evaluate] Gate 1: loss={final_loss:.4f} ckpt={ckpt_iter} "
+        f"-> {'PASS' if gate1_pass else 'FAIL'}"
     )
 
     if not gate1_pass:
@@ -824,23 +690,23 @@ def open_promotion_pr(
         new_yaml,
     )
 
-    # Gate 1 fields are embedded in the gate2 report
-    g1_parse   = report.get("gate1_parse_rate", 0)
-    g1_sel     = report.get("gate1_good_sel_rate", 0)
+    g1_loss    = report.get("final_loss", 0)
+    g1_ckpt    = report.get("checkpoint_iter", "none")
     v1_uri     = report.get("v1_dream_uri") or "(not yet generated)"
     v2_uri     = report.get("v2_dream_uri") or "(generated on-Thor after merge -- scale dreamer)"
 
     pr_body = f"""## Automated model promotion -- {model_version}
 
-**Fine-tuning:** cosmos-framework Reasoner SFT on Cosmos3-Edge (Nemotron-2B-Dense-VL)
-**Decision:** D030-A (Reasoner SFT chosen; DROID policy post-training deferred to real-arm milestone)
+**Fine-tuning:** cosmos-framework Vision SFT on Cosmos3-Edge (4B MoT Generator)
+**Decision:** D032-A (Vision SFT, empirically confirmed on single L40S)
+**Recipe:** `launch_sft_vision_edge.sh` (BridgeData2 video clips + structured captions)
 
-**Gate 1 -- Reasoning quality (val set):**
+**Gate 1 -- Training metrics:**
 
 | Metric | Value |
 |---|---|
-| Reasoning parse rate | `{g1_parse:.1%}` |
-| Good selection rate | `{g1_sel:.1%}` |
+| Final training loss | `{g1_loss:.4f}` |
+| Checkpoint | `{g1_ckpt}` |
 
 **Gate 2 -- "Dream before deploy" (Forward Dynamics comparison):**
 
@@ -851,20 +717,20 @@ def open_promotion_pr(
 
 The v2 dream video is generated on-Thor after merge by scaling the dreamer workload:
 `oc scale deployment dreamer -n flywheel --replicas=1` then back to 0 when done.
-Compare the two MP4s: the fine-tuned Reasoner selects a physically-plausible action
-chunk more consistently (D030-C, ii-b), which is visible as a smoother rollout.
+Compare the two MP4s: the fine-tuned Generator produces smoother, more physically
+coherent forward-dynamics rollouts from the same conditioning frame + action chunk.
 
 **Modelcar digest:** `{digest}`
 
 **What merging this PR does (Act 3 demo beat):**
 1. Argo syncs `deployment-green.yaml` -- green pod starts, CRI-O verifies sigstore signature
-2. Cosmos3-Edge Reasoner serves the SFT checkpoint: better embodied reasoning quality
+2. Cosmos3-Edge Generator serves the Vision SFT checkpoint: improved I2V + action quality
 3. Blue scales to 0; Service selector flips to green -- port 30800 routes to new model
 4. Run dreamer (MODEL_VERSION=cosmos3-edge-v2) to produce the post-promotion dream video
 5. Show Gate 2 side-by-side: v1 dream vs v2 dream -- the flywheel improvement, visualized
-6. Perses: model.version step-change panel shows reasoning quality improvement over time
+6. Perses: model.version step-change panel shows generation quality improvement over time
 
-_Opened automatically by the cosmos3_finetune_pipeline (NVIDIA/cosmos-framework Reasoner SFT)_
+_Opened automatically by the cosmos3_finetune_pipeline (cosmos-framework Vision SFT, D032)_
 """
 
     repo.update_file(
@@ -890,24 +756,25 @@ _Opened automatically by the cosmos3_finetune_pipeline (NVIDIA/cosmos-framework 
 @dsl.pipeline(
     name="cosmos3-edge-finetune",
     description=(
-        "Phase 4 training pipeline: ingest curated episodes -> LoRA fine-tune "
-        "Cosmos3-Edge -> Gate 1 eval -> package modelcar -> cosign sign -> open promotion PR"
+        "Phase 4 training pipeline: download BridgeData2 -> Vision SFT fine-tune "
+        "Cosmos3-Edge -> Gate 1 eval -> package modelcar -> cosign sign -> open promotion PR "
+        "(D032-A, empirically confirmed on single L40S)"
     ),
 )
 def cosmos3_finetune_pipeline(
-    # MinIO (hub-side robotics-data namespace)
+    # BridgeData2 dataset (HuggingFace Hub)
+    hf_dataset:     str   = "nvidia/BridgeData2-Subset-Synthetic-Captions",
+    hf_revision:    str   = "40d018ac1c1a2a4b9734f17fdb21f3d933c49a01",
+    # MinIO params kept for backward compatibility (unused by Vision SFT ingest)
     s3_endpoint:    str   = "http://minio.robotics-data.svc:9000",
     s3_bucket:      str   = "episodes-curated",
     s3_access_key:  str   = "admin",
     s3_secret_key:  str   = "robotics-demo-2026",
-    # Training (cosmos-framework Reasoner SFT, D030-A)
+    # Training (cosmos-framework Vision SFT, D032-A)
     model_id:       str   = "nvidia/Cosmos3-Edge",
-    max_steps:      int   = 50,     # 50 for live demo (~5-8 min on L40S); 500+ for real
-    learning_rate:  float = 5e-5,   # conservative for 2B model, single GPU
-    # Gate 1 thresholds (lenient for demo; tighten for production)
-    threshold_loss:             float = 999.0,  # lenient -- short runs don't converge
-    threshold_parse_rate:       float = 0.0,    # tighten to 0.6 for prod
-    threshold_good_sel_rate:    float = 0.0,    # tighten to 0.5 for prod
+    max_steps:      int   = 100,    # 100 for demo (~19 min on L40S); 500 for full
+    # Gate 1 threshold (lenient for demo; tighten for production)
+    threshold_loss:         float = 10.0,   # tighten to 3.0 for prod
     # Modelcar packaging + signing
     registry:       str   = "default-route-openshift-image-registry.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com",
     image_name:     str   = "thor-builds/cosmos3-edge-modelcar",
@@ -916,17 +783,18 @@ def cosmos3_finetune_pipeline(
     github_repo:    str   = "jeremyary/thor-testing",
 ):
     ingest_task = ingest_episodes(
-        s3_endpoint   = s3_endpoint,
-        s3_bucket     = s3_bucket,
-        s3_access_key = s3_access_key,
-        s3_secret_key = s3_secret_key,
+        hf_dataset    = hf_dataset,
+        hf_revision   = hf_revision,
     )
+    # Mount the HF token secret for authenticated downloads (rate limit avoidance)
+    use_secret_as_volume(ingest_task,
+                         secret_name = "hf-credentials",
+                         mount_path  = "/etc/hf")
 
     finetune_task = finetune_cosmos3(
         episodes      = ingest_task.outputs["episodes_out"],
         model_id      = model_id,
         max_steps     = max_steps,
-        learning_rate = learning_rate,
     )
     # GPU resource request -- Kueue queues this until L40S node is available (scale-from-zero)
     finetune_task.set_accelerator_type("nvidia.com/gpu").set_accelerator_limit(1)
@@ -935,13 +803,19 @@ def cosmos3_finetune_pipeline(
     # Tolerate the GPU node taint: nvidia.com/gpu=L40S_SHARED:NoSchedule
     add_toleration(finetune_task, key="nvidia.com/gpu", value="L40S_SHARED",
                    effect="NoSchedule", operator="Equal")
+    # Mount the HF token for model download during DCP conversion
+    use_secret_as_volume(finetune_task,
+                         secret_name = "hf-credentials",
+                         mount_path  = "/etc/hf")
+    # D032-A: finetune needs a PVC for scratch space (cosmos-framework ~20GB)
+    # and fsGroup: 0 for OpenShift PVC writability
+    finetune_task.set_memory_request("48Gi").set_memory_limit("60Gi")
+    finetune_task.set_cpu_request("6").set_cpu_limit("8")
 
     eval_task = evaluate(
         checkpoint               = finetune_task.outputs["checkpoint_out"],
         episodes                 = ingest_task.outputs["episodes_out"],
         threshold_loss           = threshold_loss,
-        threshold_parse_rate     = threshold_parse_rate,
-        threshold_good_sel_rate  = threshold_good_sel_rate,
     )
 
     # Gate 2: retrieve pre/post dream rollout videos from MinIO and compare.

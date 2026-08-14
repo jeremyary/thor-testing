@@ -500,3 +500,76 @@ Running both Reasoner (standard vLLM) and Generator (vLLM-Omni) simultaneously o
 **What this preserves from D030:** Forward Dynamics as the no-robot centerpiece (D030-B), real BridgeData2 seed frames (D030-E), DROID/UMI action chunks from the pool (D030-C variant), the dream video side-by-side comparison (Gate 2). The flywheel signal shifts from "text reasoning quality" to "generation quality + action trajectory quality" -- which is what the Generator actually does and what Vision SFT actually improves.
 
 **Files changed:** `robot-sim.yaml` (rewritten for Generator-native), `curator.yaml` (Generator quality scoring), `sync-agent.yaml` (updated manifest schema), `DECISIONS.md` (this entry).
+
+## D032: Empirical L40S training feasibility — real Vision SFT confirmed; D031 Reasoner/T2I corrections
+
+**Date:** 2026-08-14
+
+**Context:** D031 made two claims that turned out to be wrong, and the pipeline's `finetune_cosmos3` step was still a Reasoner-SFT stub from D030 (which consumed data fields that D031 episodes don't produce — `tick_data[].reasoning` — making it a no-op). The question "can we actually fine-tune Cosmos3-Edge on our single L40S?" had never been empirically tested. Rather than building more design on unverified assumptions, an empirical probe was run directly on the hub cluster's L40S node (`ip-10-0-37-110.ec2.internal`, g6e.2xlarge, 1× NVIDIA L40S 45GB, 8 vCPU, 62GB RAM).
+
+**D032-A: Vision SFT runs on a single L40S — empirically confirmed.**
+
+Probe pod (`sft-probe` in `vla-training` namespace, base image `nvcr.io/nvidia/pytorch:26.06-py3`) with the L40S GPU ran NVIDIA's real `examples/launch_sft_vision_edge.sh` from `nvidia/cosmos-framework` (SHA `b28c027`) with `NPROC_PER_NODE=1`, real BridgeData2 videos from `nvidia/BridgeData2-Subset-Synthetic-Captions`, and the real Cosmos3-Edge DCP checkpoint.
+
+Results:
+- **Step 2 (DCP conversion):** Downloaded 12G `nvidia/Cosmos3-Edge` model + Wan2.2 VAE from HuggingFace; wrote 6.3G DCP checkpoint. Log confirmed `dp_shard auto-inferred to world_size = 1` — single-GPU accepted cleanly.
+- **Step 3 (training):** 10 iterations completed successfully on real BridgeData2 data:
+  ```
+  Iteration 1:  Loss 2.4509 | 29.87s (torch.compile warmup)
+  Iteration 2:  Loss 2.3664 | 11.77s
+  Iteration 3:  Loss 2.6760 | 11.04s
+  ...
+  Iteration 10: saved to checkpoints/iter_000000010/model/__0_0.distcp (8.2G)
+  ```
+- **Peak GPU:** ~39GB of 45GB (fits with ~6GB headroom).
+- **Steady-state throughput:** ~11.5s per training step at `max_num_tokens_after_packing=24576`.
+
+First attempt OOM'd during backward at the default `max_num_tokens_after_packing=45056` (needed 464MB more than 45GB available). Two quality-neutral knobs closed the gap:
+1. `PYTORCH_ALLOC_CONF=expandable_segments:True` (reduces CUDA allocator fragmentation; recommended by PyTorch's own OOM error message).
+2. `max_num_tokens_after_packing: 45056 → 24576` (fewer clips packed per training step; does not reduce per-clip fidelity — just processes fewer clips per gradient accumulation micro-batch).
+
+The recipe's `keys_to_select` (from `vision_sft_edge.toml`) only trains 5 generation-pathway param groups (`moe_gen`, `time_embedder`, `vae2llm`, `llm2vae`, `k_norm_und_for_gen`) — this is why a 4B model fits on 45GB at all.
+
+**Environment recipe (hard-won, must be reproduced exactly in the pipeline):**
+- Base image: `nvcr.io/nvidia/pytorch:26.06-py3`
+- Install: `uv sync --all-extras --group=cu130-train` (NOT `cu130-torch213-train` — the torch213 group has a torchvision `0.25.0+cu128` mismatch causing `RuntimeError: operator torchvision::nms does not exist`)
+- ffmpeg/ffprobe: must be on PATH (dataloader calls `ffprobe` for video metadata); static build from johnvansickle.com works in non-root OpenShift
+- OpenShift: pod must have `fsGroup: 0` on securityContext so the PVC is group-writable; HOME must be set to a writable dir (`/scratch/home`)
+- Cosmos-framework SHA: `b28c027628db987d8eaa558faedc1d37d11125ae`
+
+**D032-B: D031's "Reasoner text output is structurally impossible" is wrong.**
+
+D031 concluded that `vllm-omni` discards `lm_head` at load time, making text generation impossible. That finding was correct **for the `vllm/vllm-omni:cosmos3` container** but was incorrectly generalized. The Cosmos3-Edge model card (HuggingFace `nvidia/Cosmos3-Edge`, checked 2026-08-14) documents a **separate `vllm/vllm-openai:cosmos3` container** that serves the Reasoner tower as a standard `/v1/chat/completions` text endpoint:
+
+```bash
+docker pull vllm/vllm-openai:cosmos3
+vllm serve nvidia/Cosmos3-Edge --host 0.0.0.0 --port 8000 --max-model-len 131072 \
+  --allowed-local-media-path / \
+  --mm-processor-kwargs '{"do_resize": true, "min_pixels": 4096, "max_pixels": 16777216}'
+```
+
+The model card's documented "Reasoning" example is a tabletop robot manipulation scene image + "generate a plan" → structured text plan with chain-of-thought. This is essentially D030's original use case. The Reasoner is a 4B model serving text via standard OpenAI-compatible chat completions.
+
+**Design impact:** The Reasoner is available for future use (e.g. a separate reasoning panel in the dashboard, or a Reasoner Alignment SFT path via `launch_sft_videophy2_edge.sh`). However, the two containers (omni for Generator, openai for Reasoner) cannot serve simultaneously on Thor's single GPU due to memory. Mode-switching (5-min reload) was rejected in D031. For the current demo, the Generator-native flywheel (D031 Option E) remains the right choice — but the Reasoner is not "structurally impossible," only "requires a container switch."
+
+**D032-C: `/v1/images/generations` is not a documented Cosmos3-Edge endpoint.**
+
+The model card documents these Generator endpoints (all via `vllm-omni`):
+- `/v1/videos/sync` — image-to-video generation (conditioning image + structured caption → video)
+- `/v1/videos` / `/v1/videos/{id}` — async video generation, forward dynamics, inverse dynamics
+- Action policy via `/v1/videos` with `action_mode: policy`
+
+**`/v1/images/generations` (text-to-image) is not documented anywhere in the model card.** Text-to-Image is a capability of `Cosmos3-Super-Text2Image` (64B, separate model), not Cosmos3-Edge (4B). Robot-sim's current Text-to-Image call is hitting an undocumented/degenerate code path in vllm-omni, which is why generated images are incoherent ("hot mess"). This must be replaced with a documented endpoint (image-to-video or action dynamics).
+
+**D032-D: The training data format for Vision SFT is BridgeData2 video clips + structured JSON captions, not episode manifests.**
+
+The current pipeline's `ingest_episodes` step collects D031 episode manifests (JSON with `generation`, `policy`, `dream_action_chunk` fields). Vision SFT needs something completely different: NVIDIA's `BridgeData2-Subset-Synthetic-Captions` JSONL, where each record has:
+- `vision_path`: path to an MP4 video clip (256×256, 5fps, ~15-20s of robot manipulation)
+- `caption_json`: rich structured JSON caption (subjects, actions, background, cinematography)
+- `t2w_windows`: temporal windows with per-window caption + caption_json
+
+For the flywheel to produce genuine training data, robot-sim would need to generate video clips (image-to-video from conditioning frames) + structured captions, not individual images. Alternatively, the flywheel curates and forwards real BridgeData2 clips with augmented/improved captions — the "curation as the flywheel signal" pattern.
+
+**Pipeline redesign:** The `finetune_cosmos3` KFP step must be rewritten to: (1) receive curated video+caption data in Vision SFT JSONL format, (2) run `convert_model_to_dcp` → `launch_sft_vision_edge.sh` → `export_model` → `convert_model_to_diffusers` using the empirically-validated environment recipe above. The existing Reasoner-SFT stub (D030 data format) is discarded entirely.
+
+**Files changed:** `DECISIONS.md` (this entry).
