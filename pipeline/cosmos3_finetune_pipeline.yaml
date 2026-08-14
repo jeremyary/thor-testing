@@ -398,11 +398,16 @@ deploymentSpec:
           \    train_env[\"PATH\"] = f\"{ffbin}:{venv_bin}:{train_env['PATH']}\"\n\
           \    # Ensure VIRTUAL_ENV is set so the launcher finds everything\n    train_env[\"\
           VIRTUAL_ENV\"] = str(cf_dir / \".venv\")\n\n    print(f\"[finetune] launching\
-          \ Vision SFT: max_steps={max_steps}, NPROC=1\")\n    result = subprocess.run(\n\
-          \        [\"bash\", \"examples/launch_sft_vision_edge.sh\"],\n        cwd=str(cf_dir),\
-          \ env=train_env,\n    )\n    if result.returncode != 0:\n        print(f\"\
-          [finetune] training exit code {result.returncode} -- checking checkpoint...\"\
-          )\n\n    # -----------------------------------------------------------------------\n\
+          \ Vision SFT: max_steps={max_steps}, NPROC=1\")\n    # Capture stdout so\
+          \ we can parse the final loss directly (the launcher's\n    # own log lands\
+          \ under $OUTPUT_ROOT/logs/, a different dir from the run dir).\n    result\
+          \ = subprocess.run(\n        [\"bash\", \"examples/launch_sft_vision_edge.sh\"\
+          ],\n        cwd=str(cf_dir), env=train_env,\n        stdout=subprocess.PIPE,\
+          \ stderr=subprocess.STDOUT, text=True,\n    )\n    train_stdout = result.stdout\
+          \ or \"\"\n    print(train_stdout)  # surface training output in the KFP\
+          \ pod logs\n    if result.returncode != 0:\n        print(f\"[finetune]\
+          \ training exit code {result.returncode} -- checking checkpoint...\")\n\n\
+          \    # -----------------------------------------------------------------------\n\
           \    # Step 6: Export DCP checkpoint to HuggingFace safetensors\n    # -----------------------------------------------------------------------\n\
           \    run_subdir = scratch / \"outputs\" / \"train\" / \"cosmos3\" / \"sft\"\
           \ / \"vision_sft_edge\"\n    ckpt_ptr   = run_subdir / \"checkpoints\" /\
@@ -416,23 +421,27 @@ deploymentSpec:
           --checkpoint-path\", str(ckpt_path),\n            \"--config-file\",   \
           \ str(config_f),\n            \"-o\",               str(export_path),\n\
           \        ], cwd=str(cf_dir), env=train_env, check=True)\n\n        # Parse\
-          \ final loss from training log\n        train_log = list(run_subdir.rglob(\"\
-          *.log\"))\n        if train_log:\n            for line in reversed(train_log[0].read_text().splitlines()):\n\
+          \ final loss -- prefer captured stdout, fall back to the\n        # launcher's\
+          \ log file under $OUTPUT_ROOT/logs/.\n        loss_sources = [train_stdout]\n\
+          \        log_dir = scratch / \"outputs\" / \"train\" / \"logs\"\n      \
+          \  loss_sources += [p.read_text() for p in log_dir.glob(\"*.log\")] if log_dir.exists()\
+          \ else []\n        for text in loss_sources:\n            for line in reversed(text.splitlines()):\n\
           \                m = re.search(r\"Loss:\\s*([\\d.]+)\", line)\n        \
           \        if m:\n                    final_loss = float(m.group(1))\n   \
-          \                 break\n    else:\n        print(\"[finetune] no checkpoint\
-          \ found -- training failed\")\n        export_path = out_dir / \"model\"\
-          \n        export_path.mkdir(parents=True, exist_ok=True)\n\n    meta = {\n\
-          \        \"model_id\":         model_id,\n        \"framework\":       \
-          \ \"cosmos-framework\",\n        \"recipe\":           \"vision_sft_edge\
-          \ (launch_sft_vision_edge.sh)\",\n        \"cf_sha\":           cf_sha,\n\
-          \        \"max_steps\":        max_steps,\n        \"max_tokens\":     \
-          \  24576,\n        \"final_loss\":       final_loss,\n        \"checkpoint_iter\"\
-          :  ckpt_ptr.read_text().strip() if ckpt_ptr.exists() else \"none\",\n  \
-          \      \"export_path\":      str(export_path),\n        \"decision\":  \
-          \       \"D032-A\",\n    }\n    (out_dir / \"training_meta.json\").write_text(json.dumps(meta,\
-          \ indent=2))\n    print(f\"[finetune] done -- loss={final_loss:.4f} export={export_path}\"\
-          )\n    return float(final_loss)\n\n"
+          \                 break\n            if final_loss > 0:\n              \
+          \  break\n    else:\n        print(\"[finetune] no checkpoint found -- training\
+          \ failed\")\n        export_path = out_dir / \"model\"\n        export_path.mkdir(parents=True,\
+          \ exist_ok=True)\n\n    meta = {\n        \"model_id\":         model_id,\n\
+          \        \"framework\":        \"cosmos-framework\",\n        \"recipe\"\
+          :           \"vision_sft_edge (launch_sft_vision_edge.sh)\",\n        \"\
+          cf_sha\":           cf_sha,\n        \"max_steps\":        max_steps,\n\
+          \        \"max_tokens\":       24576,\n        \"final_loss\":       final_loss,\n\
+          \        \"checkpoint_iter\":  ckpt_ptr.read_text().strip() if ckpt_ptr.exists()\
+          \ else \"none\",\n        \"export_path\":      str(export_path),\n    \
+          \    \"decision\":         \"D032-A\",\n    }\n    (out_dir / \"training_meta.json\"\
+          ).write_text(json.dumps(meta, indent=2))\n    print(f\"[finetune] done --\
+          \ loss={final_loss:.4f} export={export_path}\")\n    return float(final_loss)\n\
+          \n"
         image: nvcr.io/nvidia/pytorch:26.06-py3
         resources:
           accelerator:

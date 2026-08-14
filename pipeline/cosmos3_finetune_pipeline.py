@@ -290,10 +290,15 @@ def finetune_cosmos3(
     train_env["VIRTUAL_ENV"] = str(cf_dir / ".venv")
 
     print(f"[finetune] launching Vision SFT: max_steps={max_steps}, NPROC=1")
+    # Capture stdout so we can parse the final loss directly (the launcher's
+    # own log lands under $OUTPUT_ROOT/logs/, a different dir from the run dir).
     result = subprocess.run(
         ["bash", "examples/launch_sft_vision_edge.sh"],
         cwd=str(cf_dir), env=train_env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
+    train_stdout = result.stdout or ""
+    print(train_stdout)  # surface training output in the KFP pod logs
     if result.returncode != 0:
         print(f"[finetune] training exit code {result.returncode} -- checking checkpoint...")
 
@@ -318,14 +323,19 @@ def finetune_cosmos3(
             "-o",               str(export_path),
         ], cwd=str(cf_dir), env=train_env, check=True)
 
-        # Parse final loss from training log
-        train_log = list(run_subdir.rglob("*.log"))
-        if train_log:
-            for line in reversed(train_log[0].read_text().splitlines()):
+        # Parse final loss -- prefer captured stdout, fall back to the
+        # launcher's log file under $OUTPUT_ROOT/logs/.
+        loss_sources = [train_stdout]
+        log_dir = scratch / "outputs" / "train" / "logs"
+        loss_sources += [p.read_text() for p in log_dir.glob("*.log")] if log_dir.exists() else []
+        for text in loss_sources:
+            for line in reversed(text.splitlines()):
                 m = re.search(r"Loss:\s*([\d.]+)", line)
                 if m:
                     final_loss = float(m.group(1))
                     break
+            if final_loss > 0:
+                break
     else:
         print("[finetune] no checkpoint found -- training failed")
         export_path = out_dir / "model"
