@@ -46,6 +46,7 @@ data:
     EPISODE_TOPIC     = os.environ.get("EPISODE_TOPIC",      "episode-manifests")
     TRIGGER_TOPIC     = os.environ.get("TRIGGER_TOPIC",      "training-triggers")
     TRIGGER_THRESHOLD = int(os.environ.get("TRIGGER_THRESHOLD", "10"))
+    TRIGGER_COOLDOWN  = int(os.environ.get("TRIGGER_COOLDOWN",  "300"))  # seconds between triggers
     CONSUMER_GROUP    = os.environ.get("CONSUMER_GROUP",     "hub-manifest-consumer")
     DSP_URL           = os.environ.get("DSP_URL",            "https://ds-pipeline-dspa.vla-training.svc:8443")
     # Set this once the Phase 4 training pipeline is registered in DSP.
@@ -147,8 +148,9 @@ data:
 
         producer = CProducer(kafka_conf)
 
-        pending    = []
-        run_number = 0
+        pending         = []
+        run_number      = 0
+        last_trigger_ts = 0.0
 
         log.info("Consumer ready -- waiting for episode manifests")
         while True:
@@ -172,14 +174,24 @@ data:
             pending.append(manifest)
 
             if len(pending) >= TRIGGER_THRESHOLD:
-                run_number += 1
-                log.info(
-                    f"TRIGGER #{run_number}: threshold reached "
-                    f"({len(pending)} curated episodes) -- initiating training pipeline"
-                )
-                publish_trigger_confluent(producer, pending)
-                call_dsp_api(len(pending), pending)
-                pending = []
+                now = time.time()
+                if now - last_trigger_ts < TRIGGER_COOLDOWN:
+                    log.info(
+                        f"Threshold reached but cooldown active "
+                        f"({int(TRIGGER_COOLDOWN - (now - last_trigger_ts))}s remaining) "
+                        f"-- skipping trigger, draining {len(pending)} episodes"
+                    )
+                    pending = []
+                else:
+                    run_number += 1
+                    last_trigger_ts = now
+                    log.info(
+                        f"TRIGGER #{run_number}: threshold reached "
+                        f"({len(pending)} curated episodes) -- initiating training pipeline"
+                    )
+                    publish_trigger_confluent(producer, pending)
+                    call_dsp_api(len(pending), pending)
+                    pending = []
 
     if __name__ == "__main__":
         while True:
@@ -235,7 +247,7 @@ spec:
             # Pipeline ID for the cosmos3-edge-finetune pipeline registered in DSP.
             # Set by upload_pipeline.sh; updated here after each re-upload.
             - name: TRAINING_PIPELINE_ID
-              value: "b2ae4cdd-fa8a-441d-aaf0-17c77bc6f487"
+              value: "4bad9812-48cd-4721-974d-77f58864e360"
           resources:
             requests:
               cpu: 50m
