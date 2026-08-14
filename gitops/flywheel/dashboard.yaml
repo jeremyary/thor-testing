@@ -875,7 +875,7 @@ data:
           <div class="annotation" style="margin-top:4px;font-size:10px">
             Real 256&times;256 BridgeData2 frame (WidowX arm, UC Berkeley RAIL).
             This image is sent to the Action Policy as visual conditioning.
-            The Text&rarr;Image prompt above generates a separate 640&times;640 scene.
+             The Image&rarr;Video call generates a short clip from this conditioning frame.
           </div>
         </div>
       </div>
@@ -885,7 +885,7 @@ data:
         <div class="card-header">
           <span class="card-title">Generator Output</span>
           <span class="annotation" style="font-size:10px">
-            Cosmos3-Edge Generator: Text&rarr;Image (640&times;640) + Action Policy (DROID)
+             Cosmos3-Edge Generator: Image&rarr;Video (256&times;256) + Action Policy (DROID)
           </span>
         </div>
         <div class="card-body" id="generator-body">
