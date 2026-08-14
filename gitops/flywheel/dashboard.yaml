@@ -758,11 +758,9 @@ data:
     .dream-controls { display: flex; gap: 6px; }
     .dream-smoothness { font-size: 11px; color: var(--txt2); }
 
-    /* ---- Curation log --------------------------------------------------- */
-    #log-card { grid-column: 1 / -1; grid-row: 4; }
-    #log-header-extra { display: flex; gap: 8px; align-items: center; }
+    /* ---- Curation log (inline in Generator Output card) -------------------- */
     #log-body {
-      height: 240px;
+      max-height: 200px;
       overflow-y: auto;
       scroll-behavior: smooth;
     }
@@ -1003,6 +1001,12 @@ data:
                 On-device quality gate &mdash; rejected episodes never leave Thor
               </div>
             </div>
+            <!-- Inline curation log (moved here from standalone card) -->
+            <div id="log-body" style="max-height:200px;overflow-y:auto;margin-top:10px;font-size:11px">
+              <div id="log-empty" style="color:var(--txt3);text-align:center;padding:12px 0;font-size:11px">
+                Episodes will appear here once the flywheel starts
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -1108,21 +1112,7 @@ data:
         </div>
       </div>
 
-      <!-- CURATION LOG -->
-      <div class="card" id="log-card">
-        <div class="card-header">
-          <span class="card-title">Curation Log</span>
-          <div id="log-header-extra">
-            <span id="log-count" class="annotation">0 entries</span>
-            <button class="btn btn-gray btn-sm" id="btn-ann-log" onclick="toggleLogAnnotations()">
-              &#9432; Reasons
-            </button>
-          </div>
-        </div>
-        <div id="log-body">
-          <div id="log-empty">Flywheel not yet started &mdash; episodes will appear here</div>
-        </div>
-      </div>
+      <!-- Curation log is now inline in the Generator Output card above -->
 
       <!-- STATUS BAR -->
       <div id="statusbar">
@@ -1185,7 +1175,7 @@ data:
 
     // ---- State ---------------------------------------------------------------
     // annotations always visible (toggle removed)
-    let logAnnotationsOn = false;
+    let logAnnotationsOn = true;
     let autoScroll      = true;
     let logEntries      = [];
     const MAX_LOG       = 30;
@@ -1464,16 +1454,6 @@ data:
       if (autoScroll) {
         logBody.scrollTop = 0;
       }
-    }
-
-    // ---- Annotations toggle ------------------------------------------------
-    function toggleLogAnnotations() {
-      logAnnotationsOn = !logAnnotationsOn;
-      document.querySelectorAll('.log-reason').forEach(el => {
-        el.classList.toggle('show', logAnnotationsOn);
-      });
-      document.getElementById('btn-ann-log').textContent =
-        logAnnotationsOn ? '\u2139 Reasons' : '\u2139 Reasons';
     }
 
     // ---- Controls -----------------------------------------------------------
