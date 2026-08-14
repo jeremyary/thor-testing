@@ -7,8 +7,11 @@
 
 Quick recording showcasing the full stack. Dashboard-driven — minimal terminal. ~10-12 minutes.
 
-> [!WARNING]
-> **`combined-registry-auth` Secret expires 2026-09-11.** Refresh before demo if needed.
+> [!NOTE]
+> The `combined-registry-auth` Secret (thor-builds) holds a time-limited registry
+> token. If a build/push fails with a 401, refresh it per DEPLOYMENT_GUIDE.md
+> § Registry Auth. Verify the embedded token's expiry with:
+> `oc get secret combined-registry-auth -n thor-builds -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d`
 
 ## Pre-Demo (5 min before recording)
 
