@@ -399,7 +399,7 @@ data:
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Physical AI Edge Flywheel — Thor</title>
     <style>
-    :root {
+    :root, [data-theme="light"] {
       --bg:        #f5f6f8;
       --card:      #ffffff;
       --card2:     #f0f1f3;
@@ -418,6 +418,25 @@ data:
       --rh-red:    #ee0000;
       --gold:      #96690d;
     }
+    [data-theme="dark"] {
+      --bg:        #1a1d24;
+      --card:      #21252d;
+      --card2:     #292e38;
+      --border:    #3a3f4b;
+      --border2:   #4a5060;
+      --txt:       #e8eaee;
+      --txt2:      #a8adb8;
+      --txt3:      #6a7080;
+      --green:     #3fbe8a;
+      --green-dim: #1a3d2e;
+      --red:       #f56b5e;
+      --red-dim:   #3d1f1c;
+      --blue:      #4da3ff;
+      --blue-dim:  #1c2e44;
+      --orange:    #e89040;
+      --rh-red:    #ff4040;
+      --gold:      #d4a84a;
+    }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       background: var(--bg);
@@ -426,6 +445,36 @@ data:
       font-size: 13px;
       line-height: 1.5;
       min-height: 100vh;
+    }
+
+    /* ---- Theme toggle --------------------------------------------------- */
+    .theme-toggle {
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid var(--border2);
+      border-radius: 6px;
+      overflow: hidden;
+      margin-left: 8px;
+    }
+    .theme-toggle button {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px; height: 28px;
+      border: none;
+      cursor: pointer;
+      font-size: 14px;
+      background: transparent;
+      color: var(--txt3);
+      transition: background 0.15s, color 0.15s;
+    }
+    .theme-toggle button:first-child { border-right: 1px solid var(--border2); }
+    .theme-toggle button.active {
+      background: var(--blue);
+      color: #fff;
+    }
+    [data-theme="dark"] .theme-toggle button.active {
+      background: var(--blue);
     }
 
     /* ---- Header --------------------------------------------------------- */
@@ -533,7 +582,7 @@ data:
     #scene-card { grid-column: 1; grid-row: 1; }
     #scene-img-wrap {
       width: 100%; aspect-ratio: 1;
-      background: #e8eaee;
+      background: var(--card2);
       border-radius: 4px;
       overflow: hidden;
       position: relative;
@@ -650,7 +699,7 @@ data:
       padding: 6px 14px;
       background: linear-gradient(90deg, var(--green-dim), var(--green-dim) 60%, transparent);
       border-top: 1px solid var(--green);
-      font-size: 11px; color: #065f44;
+      font-size: 11px; color: var(--green);
       display: none;
     }
     #trigger-banner.show { display: block; }
@@ -672,7 +721,7 @@ data:
     .dream-panel {}
     .dream-video-wrap {
       aspect-ratio: 16/9;
-      background: #e8eaee;
+      background: var(--card2);
       border-radius: 6px;
       overflow: hidden;
       position: relative;
@@ -848,6 +897,10 @@ data:
         <button class="btn btn-gray btn-sm" id="btn-ann" onclick="toggleAnnotations()">
           &#9881; Annotations
         </button>
+        <div class="theme-toggle" id="theme-toggle">
+          <button id="theme-light" title="Light" onclick="setTheme('light')">&#9788;</button>
+          <button id="theme-dark" title="Dark" onclick="setTheme('dark')">&#9790;</button>
+        </div>
       </div>
     </div>
 
@@ -896,7 +949,7 @@ data:
             <!-- Three-column: generated clip | I2V stats | Policy stats -->
             <div style="display:grid;grid-template-columns:200px 1fr 1fr;gap:14px;margin-bottom:12px">
               <!-- Generated video clip (I2V) or image -->
-              <div style="border:1px solid var(--border);border-radius:6px;overflow:hidden;background:#e8eaee;position:relative">
+              <div style="border:1px solid var(--border);border-radius:6px;overflow:hidden;background:var(--card2);position:relative">
                 <div id="gen-img-placeholder" style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--txt3);font-size:11px;text-align:center;padding:10px">
                   Generated clip<br>will appear here
                 </div>
@@ -1117,6 +1170,26 @@ data:
     <div id="toast"></div>
 
     <script>
+    // ---- Theme toggle --------------------------------------------------------
+    function setTheme(t) {
+      document.documentElement.setAttribute('data-theme', t);
+      localStorage.setItem('flywheel-theme', t);
+      document.getElementById('theme-light').classList.toggle('active', t === 'light');
+      document.getElementById('theme-dark').classList.toggle('active', t === 'dark');
+    }
+    // Apply saved theme immediately (before paint)
+    (function() {
+      const saved = localStorage.getItem('flywheel-theme') || 'light';
+      document.documentElement.setAttribute('data-theme', saved);
+      // Button highlight applied after DOM ready below
+    })();
+    // Set button state once DOM is ready
+    document.addEventListener('DOMContentLoaded', function() {
+      const t = localStorage.getItem('flywheel-theme') || 'light';
+      document.getElementById('theme-light').classList.toggle('active', t === 'light');
+      document.getElementById('theme-dark').classList.toggle('active', t === 'dark');
+    });
+
     // ---- State ---------------------------------------------------------------
     let annotationsOn   = true;
     let logAnnotationsOn = false;
