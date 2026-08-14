@@ -3,8 +3,6 @@
 # Description: Phase 4 training pipeline: download BridgeData2 -> Vision SFT fine-tune Cosmos3-Edge -> Gate 1 eval -> package modelcar -> cosign sign -> open promotion PR (D032-A, empirically confirmed on single L40S)
 # Inputs:
 #    github_repo: str [Default: 'jeremyary/thor-testing']
-#    hf_dataset: str [Default: 'nvidia/BridgeData2-Subset-Synthetic-Captions']
-#    hf_revision: str [Default: '40d018ac1c1a2a4b9734f17fdb21f3d933c49a01']
 #    image_name: str [Default: 'thor-builds/cosmos3-edge-modelcar']
 #    max_steps: int [Default: 100.0]
 #    model_id: str [Default: 'nvidia/Cosmos3-Edge']
@@ -108,32 +106,8 @@ components:
     executorLabel: exec-ingest-episodes
     inputDefinitions:
       parameters:
-        hf_dataset:
-          defaultValue: nvidia/BridgeData2-Subset-Synthetic-Captions
-          isOptional: true
-          parameterType: STRING
-        hf_revision:
-          defaultValue: 40d018ac1c1a2a4b9734f17fdb21f3d933c49a01
-          isOptional: true
-          parameterType: STRING
-        hf_token_path:
-          defaultValue: /etc/hf/HF_TOKEN
-          isOptional: true
-          parameterType: STRING
-        s3_access_key:
-          defaultValue: ''
-          isOptional: true
-          parameterType: STRING
-        s3_bucket:
-          defaultValue: ''
-          isOptional: true
-          parameterType: STRING
-        s3_endpoint:
-          defaultValue: ''
-          isOptional: true
-          parameterType: STRING
-        s3_secret_key:
-          defaultValue: ''
+        dataset_pvc_path:
+          defaultValue: /dataset/BridgeData2-Subset-Synthetic-Captions
           isOptional: true
           parameterType: STRING
     outputDefinitions:
@@ -326,18 +300,22 @@ deploymentSpec:
           \    Install: uv sync --all-extras --group=cu130-train (torch 2.10+cu130)\n\
           \    \"\"\"\n    import subprocess, pathlib, json, os, sys, re\n\n    out_dir\
           \ = pathlib.Path(checkpoint_out.path)\n    out_dir.mkdir(parents=True, exist_ok=True)\n\
-          \n    # Locate the dataset (downloaded by ingest_episodes)\n    data_root\
-          \ = pathlib.Path(episodes.path)\n    jsonl_candidates = list(data_root.rglob(\"\
-          video_dataset_file.jsonl\"))\n    if not jsonl_candidates:\n        print(\"\
-          [finetune] ERROR: no video_dataset_file.jsonl found in dataset\")\n    \
-          \    meta = {\"model_id\": model_id, \"max_steps\": 0, \"final_loss\": 0.0,\n\
-          \                \"error\": \"no JSONL\", \"decision\": \"D032-A\"}\n  \
-          \      (out_dir / \"training_meta.json\").write_text(json.dumps(meta, indent=2))\n\
-          \        return 0.0\n\n    # DATASET_PATH should be the parent of train/\
-          \ (the sft_dataset_bridge dir)\n    dataset_path = jsonl_candidates[0].parent.parent\
-          \  # train/.. -> sft_dataset_bridge\n    train_count = sum(1 for _ in jsonl_candidates[0].open())\n\
-          \    print(f\"[finetune] dataset={dataset_path} clips={train_count} max_steps={max_steps}\"\
-          )\n\n    # -----------------------------------------------------------------------\n\
+          \n    # Locate the dataset -- ingest_episodes writes dataset_path.txt pointing\n\
+          \    # to the pre-staged PVC location\n    data_root = pathlib.Path(episodes.path)\n\
+          \    path_file = data_root / \"dataset_path.txt\"\n    if path_file.exists():\n\
+          \        dataset_path = pathlib.Path(path_file.read_text().strip())\n  \
+          \  else:\n        # Fallback: search for the JSONL directly\n        jsonl_candidates\
+          \ = list(data_root.rglob(\"video_dataset_file.jsonl\"))\n        if not\
+          \ jsonl_candidates:\n            print(\"[finetune] ERROR: no dataset found\"\
+          )\n            meta = {\"model_id\": model_id, \"max_steps\": 0, \"final_loss\"\
+          : 0.0,\n                    \"error\": \"no dataset\", \"decision\": \"\
+          D032-A\"}\n            (out_dir / \"training_meta.json\").write_text(json.dumps(meta,\
+          \ indent=2))\n            return 0.0\n        dataset_path = jsonl_candidates[0].parent.parent\n\
+          \n    jsonl_path = dataset_path / \"train\" / \"video_dataset_file.jsonl\"\
+          \n    assert jsonl_path.exists(), f\"JSONL not found at {jsonl_path}\"\n\
+          \    train_count = sum(1 for _ in jsonl_path.open())\n    print(f\"[finetune]\
+          \ dataset={dataset_path} clips={train_count} max_steps={max_steps}\")\n\n\
+          \    # -----------------------------------------------------------------------\n\
           \    # Step 1: Setup -- writable HOME, ffprobe, clone cosmos-framework\n\
           \    # -----------------------------------------------------------------------\n\
           \    scratch = pathlib.Path(\"/scratch\")\n    scratch.mkdir(exist_ok=True)\n\
@@ -556,8 +534,7 @@ deploymentSpec:
         - -c
         - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
           \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
-          \ python3 -m pip install --quiet --no-warn-script-location 'huggingface_hub==0.30.0'\
-          \  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.17.0'\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.17.0'\
           \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
           $0\" \"$@\"\n"
         - sh
@@ -571,41 +548,32 @@ deploymentSpec:
 
           '
         - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
-          \ *\n\ndef ingest_episodes(\n    hf_dataset:    str = \"nvidia/BridgeData2-Subset-Synthetic-Captions\"\
-          ,\n    hf_revision:   str = \"40d018ac1c1a2a4b9734f17fdb21f3d933c49a01\"\
-          ,\n    hf_token_path: str = \"/etc/hf/HF_TOKEN\",\n    # Kept for API compatibility\
-          \ with the pipeline wiring; unused now\n    s3_endpoint:   str = \"\",\n\
-          \    s3_bucket:     str = \"\",\n    s3_access_key: str = \"\",\n    s3_secret_key:\
-          \ str = \"\",\n    episodes_out:  dsl.Output[dsl.Dataset] = None,\n) ->\
-          \ int:\n    \"\"\"Download the BridgeData2 Vision SFT dataset from HuggingFace\
-          \ Hub (D032-D).\n\n    cosmos-framework Vision SFT (launch_sft_vision_edge.sh)\
-          \ expects the dataset at\n    DATASET_PATH pointing to a directory containing:\n\
-          \      train/video_dataset_file.jsonl  -- each line: {uuid, vision_path,\
-          \ caption_json, ...}\n      train/videos/*.mp4             -- BridgeData2\
-          \ robot manipulation clips (256x256, 5fps)\n\n    The JSONL format uses\
-          \ structured caption_json (subjects, actions, background,\n    cinematography)\
-          \ which is the model's native prompt format. This component\n    downloads\
-          \ the dataset directly from nvidia/BridgeData2-Subset-Synthetic-Captions\n\
-          \    on HuggingFace Hub.\n    \"\"\"\n    import pathlib, os\n\n    out\
-          \ = pathlib.Path(episodes_out.path)\n    dataset_dir = out / \"sft_dataset_bridge\"\
-          \n    dataset_dir.mkdir(parents=True, exist_ok=True)\n\n    # Read HF token\
-          \ if available (raises rate limits)\n    token = None\n    token_path =\
-          \ pathlib.Path(hf_token_path)\n    if token_path.exists():\n        token\
-          \ = token_path.read_text().strip()\n    elif os.environ.get(\"HF_TOKEN\"\
-          ):\n        token = os.environ[\"HF_TOKEN\"]\n\n    from huggingface_hub\
-          \ import snapshot_download\n\n    print(f\"[ingest] downloading {hf_dataset}\
-          \ @ {hf_revision[:12]}...\")\n    snapshot_download(\n        repo_id=hf_dataset,\n\
-          \        repo_type=\"dataset\",\n        revision=hf_revision,\n       \
-          \ local_dir=str(out),\n        token=token,\n    )\n\n    # Verify the required\
-          \ files exist\n    jsonl_path = dataset_dir / \"train\" / \"video_dataset_file.jsonl\"\
-          \n    videos_dir = dataset_dir / \"train\" / \"videos\"\n\n    if not jsonl_path.exists():\n\
-          \        # Handle case where dataset is at the root of the download\n  \
-          \      alt_jsonl = out / \"sft_dataset_bridge\" / \"train\" / \"video_dataset_file.jsonl\"\
-          \n        if alt_jsonl.exists():\n            jsonl_path = alt_jsonl\n\n\
-          \    assert jsonl_path.exists(), f\"JSONL not found at {jsonl_path}\"\n\n\
-          \    line_count = sum(1 for _ in jsonl_path.open())\n    video_count = len(list(videos_dir.glob(\"\
-          *.mp4\"))) if videos_dir.exists() else 0\n    print(f\"[ingest] dataset\
-          \ ready: {line_count} clips, {video_count} videos\")\n    return line_count\n\
+          \ *\n\ndef ingest_episodes(\n    dataset_pvc_path: str = \"/dataset/BridgeData2-Subset-Synthetic-Captions\"\
+          ,\n    episodes_out:     dsl.Output[dsl.Dataset] = None,\n) -> int:\n  \
+          \  \"\"\"Locate the pre-staged BridgeData2 Vision SFT dataset on a PVC (D032-D).\n\
+          \n    The dataset (nvidia/BridgeData2-Subset-Synthetic-Captions) is pre-downloaded\n\
+          \    to a PVC named 'bridgedata2-dataset' to avoid HuggingFace rate limits\
+          \ during\n    pipeline runs (4077 small files hit the 5000-req/5min quota).\n\
+          \n    cosmos-framework Vision SFT expects:\n      sft_dataset_bridge/train/video_dataset_file.jsonl\n\
+          \      sft_dataset_bridge/train/videos/*.mp4\n    \"\"\"\n    import pathlib,\
+          \ shutil\n\n    src = pathlib.Path(dataset_pvc_path)\n    out = pathlib.Path(episodes_out.path)\n\
+          \n    # Find the JSONL in the pre-staged data\n    jsonl_candidates = list(src.rglob(\"\
+          video_dataset_file.jsonl\"))\n    if not jsonl_candidates:\n        raise\
+          \ FileNotFoundError(\n            f\"Dataset not found at {src}. Pre-stage\
+          \ it with:\\n\"\n            f\"  huggingface_hub.snapshot_download('nvidia/BridgeData2-Subset-Synthetic-Captions',\
+          \ \"\n            f\"local_dir='{src}')\"\n        )\n\n    # The output\
+          \ artifact needs to contain the dataset path.\n    # Symlink the PVC data\
+          \ into the output artifact directory so downstream\n    # steps can find\
+          \ it without copying multi-GB of data.\n    sft_dir = None\n    for candidate\
+          \ in jsonl_candidates:\n        # train/video_dataset_file.jsonl -> parent\
+          \ is train/, grandparent is sft_dataset_bridge/\n        sft_dir = candidate.parent.parent\n\
+          \        break\n\n    # Write a marker so finetune step knows where to find\
+          \ the data\n    out.mkdir(parents=True, exist_ok=True)\n    (out / \"dataset_path.txt\"\
+          ).write_text(str(sft_dir))\n\n    line_count = sum(1 for _ in jsonl_candidates[0].open())\n\
+          \    videos_dir = jsonl_candidates[0].parent / \"videos\"\n    video_count\
+          \ = len(list(videos_dir.glob(\"*.mp4\"))) if videos_dir.exists() else 0\n\
+          \    print(f\"[ingest] pre-staged dataset found at {sft_dir}\")\n    print(f\"\
+          [ingest] {line_count} clips, {video_count} videos\")\n    return line_count\n\
           \n"
         image: python:3.12-slim
     exec-open-promotion-pr:
@@ -892,12 +860,6 @@ root:
           enableCache: true
         componentRef:
           name: comp-ingest-episodes
-        inputs:
-          parameters:
-            hf_dataset:
-              componentInputParameter: hf_dataset
-            hf_revision:
-              componentInputParameter: hf_revision
         taskInfo:
           name: ingest-episodes
       open-promotion-pr:
@@ -973,14 +935,6 @@ root:
         defaultValue: jeremyary/thor-testing
         isOptional: true
         parameterType: STRING
-      hf_dataset:
-        defaultValue: nvidia/BridgeData2-Subset-Synthetic-Captions
-        isOptional: true
-        parameterType: STRING
-      hf_revision:
-        defaultValue: 40d018ac1c1a2a4b9734f17fdb21f3d933c49a01
-        isOptional: true
-        parameterType: STRING
       image_name:
         defaultValue: thor-builds/cosmos3-edge-modelcar
         isOptional: true
@@ -1032,26 +986,24 @@ platforms:
           podMetadata:
             labels:
               kueue.x-k8s.io/queue-name: robotics-train
-          secretAsVolume:
-          - mountPath: /etc/hf
-            optional: false
-            secretName: hf-credentials
-            secretNameParameter:
+          pvcMount:
+          - constant: bridgedata2-dataset
+            mountPath: /dataset
+            pvcNameParameter:
               runtimeValue:
-                constant: hf-credentials
+                constant: bridgedata2-dataset
           tolerations:
           - effect: NoSchedule
             key: nvidia.com/gpu
             operator: Equal
             value: L40S_SHARED
         exec-ingest-episodes:
-          secretAsVolume:
-          - mountPath: /etc/hf
-            optional: false
-            secretName: hf-credentials
-            secretNameParameter:
+          pvcMount:
+          - constant: bridgedata2-dataset
+            mountPath: /dataset
+            pvcNameParameter:
               runtimeValue:
-                constant: hf-credentials
+                constant: bridgedata2-dataset
         exec-open-promotion-pr:
           secretAsVolume:
           - mountPath: /etc/github

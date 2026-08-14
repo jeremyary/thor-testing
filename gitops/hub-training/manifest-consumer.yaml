@@ -247,7 +247,7 @@ spec:
             # Pipeline ID for the cosmos3-edge-finetune pipeline registered in DSP.
             # Set by upload_pipeline.sh; updated here after each re-upload.
             - name: TRAINING_PIPELINE_ID
-              value: "4bad9812-48cd-4721-974d-77f58864e360"
+              value: "91e079bc-9452-4d79-b136-2ccda6d496a7"
           resources:
             requests:
               cpu: 50m

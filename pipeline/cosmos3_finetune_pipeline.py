@@ -46,80 +46,63 @@ from kfp import dsl
 from kfp.kubernetes import (
     add_pod_label,
     add_toleration,
+    mount_pvc,
     use_secret_as_volume,
 )
 
 
 # ---------------------------------------------------------------------------
-# Component: ingest -- download BridgeData2 Vision SFT dataset from HuggingFace
+# Component: ingest -- locate pre-staged BridgeData2 Vision SFT dataset on PVC
 # ---------------------------------------------------------------------------
 @dsl.component(
     base_image="python:3.12-slim",
-    packages_to_install=["huggingface_hub==0.30.0"],
 )
 def ingest_episodes(
-    hf_dataset:    str = "nvidia/BridgeData2-Subset-Synthetic-Captions",
-    hf_revision:   str = "40d018ac1c1a2a4b9734f17fdb21f3d933c49a01",
-    hf_token_path: str = "/etc/hf/HF_TOKEN",
-    # Kept for API compatibility with the pipeline wiring; unused now
-    s3_endpoint:   str = "",
-    s3_bucket:     str = "",
-    s3_access_key: str = "",
-    s3_secret_key: str = "",
-    episodes_out:  dsl.Output[dsl.Dataset] = None,
+    dataset_pvc_path: str = "/dataset/BridgeData2-Subset-Synthetic-Captions",
+    episodes_out:     dsl.Output[dsl.Dataset] = None,
 ) -> int:
-    """Download the BridgeData2 Vision SFT dataset from HuggingFace Hub (D032-D).
+    """Locate the pre-staged BridgeData2 Vision SFT dataset on a PVC (D032-D).
 
-    cosmos-framework Vision SFT (launch_sft_vision_edge.sh) expects the dataset at
-    DATASET_PATH pointing to a directory containing:
-      train/video_dataset_file.jsonl  -- each line: {uuid, vision_path, caption_json, ...}
-      train/videos/*.mp4             -- BridgeData2 robot manipulation clips (256x256, 5fps)
+    The dataset (nvidia/BridgeData2-Subset-Synthetic-Captions) is pre-downloaded
+    to a PVC named 'bridgedata2-dataset' to avoid HuggingFace rate limits during
+    pipeline runs (4077 small files hit the 5000-req/5min quota).
 
-    The JSONL format uses structured caption_json (subjects, actions, background,
-    cinematography) which is the model's native prompt format. This component
-    downloads the dataset directly from nvidia/BridgeData2-Subset-Synthetic-Captions
-    on HuggingFace Hub.
+    cosmos-framework Vision SFT expects:
+      sft_dataset_bridge/train/video_dataset_file.jsonl
+      sft_dataset_bridge/train/videos/*.mp4
     """
-    import pathlib, os
+    import pathlib, shutil
 
+    src = pathlib.Path(dataset_pvc_path)
     out = pathlib.Path(episodes_out.path)
-    dataset_dir = out / "sft_dataset_bridge"
-    dataset_dir.mkdir(parents=True, exist_ok=True)
 
-    # Read HF token if available (raises rate limits)
-    token = None
-    token_path = pathlib.Path(hf_token_path)
-    if token_path.exists():
-        token = token_path.read_text().strip()
-    elif os.environ.get("HF_TOKEN"):
-        token = os.environ["HF_TOKEN"]
+    # Find the JSONL in the pre-staged data
+    jsonl_candidates = list(src.rglob("video_dataset_file.jsonl"))
+    if not jsonl_candidates:
+        raise FileNotFoundError(
+            f"Dataset not found at {src}. Pre-stage it with:\n"
+            f"  huggingface_hub.snapshot_download('nvidia/BridgeData2-Subset-Synthetic-Captions', "
+            f"local_dir='{src}')"
+        )
 
-    from huggingface_hub import snapshot_download
+    # The output artifact needs to contain the dataset path.
+    # Symlink the PVC data into the output artifact directory so downstream
+    # steps can find it without copying multi-GB of data.
+    sft_dir = None
+    for candidate in jsonl_candidates:
+        # train/video_dataset_file.jsonl -> parent is train/, grandparent is sft_dataset_bridge/
+        sft_dir = candidate.parent.parent
+        break
 
-    print(f"[ingest] downloading {hf_dataset} @ {hf_revision[:12]}...")
-    snapshot_download(
-        repo_id=hf_dataset,
-        repo_type="dataset",
-        revision=hf_revision,
-        local_dir=str(out),
-        token=token,
-    )
+    # Write a marker so finetune step knows where to find the data
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "dataset_path.txt").write_text(str(sft_dir))
 
-    # Verify the required files exist
-    jsonl_path = dataset_dir / "train" / "video_dataset_file.jsonl"
-    videos_dir = dataset_dir / "train" / "videos"
-
-    if not jsonl_path.exists():
-        # Handle case where dataset is at the root of the download
-        alt_jsonl = out / "sft_dataset_bridge" / "train" / "video_dataset_file.jsonl"
-        if alt_jsonl.exists():
-            jsonl_path = alt_jsonl
-
-    assert jsonl_path.exists(), f"JSONL not found at {jsonl_path}"
-
-    line_count = sum(1 for _ in jsonl_path.open())
+    line_count = sum(1 for _ in jsonl_candidates[0].open())
+    videos_dir = jsonl_candidates[0].parent / "videos"
     video_count = len(list(videos_dir.glob("*.mp4"))) if videos_dir.exists() else 0
-    print(f"[ingest] dataset ready: {line_count} clips, {video_count} videos")
+    print(f"[ingest] pre-staged dataset found at {sft_dir}")
+    print(f"[ingest] {line_count} clips, {video_count} videos")
     return line_count
 
 
@@ -159,19 +142,26 @@ def finetune_cosmos3(
     out_dir = pathlib.Path(checkpoint_out.path)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Locate the dataset (downloaded by ingest_episodes)
+    # Locate the dataset -- ingest_episodes writes dataset_path.txt pointing
+    # to the pre-staged PVC location
     data_root = pathlib.Path(episodes.path)
-    jsonl_candidates = list(data_root.rglob("video_dataset_file.jsonl"))
-    if not jsonl_candidates:
-        print("[finetune] ERROR: no video_dataset_file.jsonl found in dataset")
-        meta = {"model_id": model_id, "max_steps": 0, "final_loss": 0.0,
-                "error": "no JSONL", "decision": "D032-A"}
-        (out_dir / "training_meta.json").write_text(json.dumps(meta, indent=2))
-        return 0.0
+    path_file = data_root / "dataset_path.txt"
+    if path_file.exists():
+        dataset_path = pathlib.Path(path_file.read_text().strip())
+    else:
+        # Fallback: search for the JSONL directly
+        jsonl_candidates = list(data_root.rglob("video_dataset_file.jsonl"))
+        if not jsonl_candidates:
+            print("[finetune] ERROR: no dataset found")
+            meta = {"model_id": model_id, "max_steps": 0, "final_loss": 0.0,
+                    "error": "no dataset", "decision": "D032-A"}
+            (out_dir / "training_meta.json").write_text(json.dumps(meta, indent=2))
+            return 0.0
+        dataset_path = jsonl_candidates[0].parent.parent
 
-    # DATASET_PATH should be the parent of train/ (the sft_dataset_bridge dir)
-    dataset_path = jsonl_candidates[0].parent.parent  # train/.. -> sft_dataset_bridge
-    train_count = sum(1 for _ in jsonl_candidates[0].open())
+    jsonl_path = dataset_path / "train" / "video_dataset_file.jsonl"
+    assert jsonl_path.exists(), f"JSONL not found at {jsonl_path}"
+    train_count = sum(1 for _ in jsonl_path.open())
     print(f"[finetune] dataset={dataset_path} clips={train_count} max_steps={max_steps}")
 
     # -----------------------------------------------------------------------
@@ -762,10 +752,7 @@ _Opened automatically by the cosmos3_finetune_pipeline (cosmos-framework Vision 
     ),
 )
 def cosmos3_finetune_pipeline(
-    # BridgeData2 dataset (HuggingFace Hub)
-    hf_dataset:     str   = "nvidia/BridgeData2-Subset-Synthetic-Captions",
-    hf_revision:    str   = "40d018ac1c1a2a4b9734f17fdb21f3d933c49a01",
-    # MinIO params kept for backward compatibility (unused by Vision SFT ingest)
+    # MinIO params kept for backward compatibility (used by gate2 dream lookup)
     s3_endpoint:    str   = "http://minio.robotics-data.svc:9000",
     s3_bucket:      str   = "episodes-curated",
     s3_access_key:  str   = "admin",
@@ -782,14 +769,11 @@ def cosmos3_finetune_pipeline(
     # Promotion PR
     github_repo:    str   = "jeremyary/thor-testing",
 ):
-    ingest_task = ingest_episodes(
-        hf_dataset    = hf_dataset,
-        hf_revision   = hf_revision,
-    )
-    # Mount the HF token secret for authenticated downloads (rate limit avoidance)
-    use_secret_as_volume(ingest_task,
-                         secret_name = "hf-credentials",
-                         mount_path  = "/etc/hf")
+    ingest_task = ingest_episodes()
+    # Mount the pre-staged dataset PVC
+    mount_pvc(ingest_task,
+              pvc_name="bridgedata2-dataset",
+              mount_path="/dataset")
 
     finetune_task = finetune_cosmos3(
         episodes      = ingest_task.outputs["episodes_out"],
@@ -803,12 +787,11 @@ def cosmos3_finetune_pipeline(
     # Tolerate the GPU node taint: nvidia.com/gpu=L40S_SHARED:NoSchedule
     add_toleration(finetune_task, key="nvidia.com/gpu", value="L40S_SHARED",
                    effect="NoSchedule", operator="Equal")
-    # Mount the HF token for model download during DCP conversion
-    use_secret_as_volume(finetune_task,
-                         secret_name = "hf-credentials",
-                         mount_path  = "/etc/hf")
-    # D032-A: finetune needs a PVC for scratch space (cosmos-framework ~20GB)
-    # and fsGroup: 0 for OpenShift PVC writability
+    # Mount the pre-staged dataset PVC (finetune reads it directly)
+    mount_pvc(finetune_task,
+              pvc_name="bridgedata2-dataset",
+              mount_path="/dataset")
+    # D032-A: finetune needs large memory for cosmos-framework
     finetune_task.set_memory_request("48Gi").set_memory_limit("60Gi")
     finetune_task.set_cpu_request("6").set_cpu_limit("8")
 
