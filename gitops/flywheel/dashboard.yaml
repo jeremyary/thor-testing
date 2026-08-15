@@ -1292,12 +1292,15 @@ data:
         }
       }
 
-      // Generator output (D031)
-      if (lat.generation || lat.policy) {
+      // Generator output -- only update DOM when the episode actually changes
+      // (prevents blinking on the 3-second status poll when flywheel is stopped)
+      const genKey = JSON.stringify(lat.generation) + JSON.stringify(lat.policy) + (lat.curation_score||'');
+      if ((lat.generation || lat.policy) && genKey !== window._lastGenKey) {
+        window._lastGenKey = genKey;
         document.getElementById('gen-empty').style.display = 'none';
         document.getElementById('gen-fields').style.display = 'block';
 
-        // Generated video clip - reload on each status update (robot-sim writes latest_generated.mp4)
+        // Generated video clip
         const gen = lat.generation || {};
         const genOk = gen.status === 'ok';
         if (genOk) {
@@ -1336,8 +1339,6 @@ data:
           pol.latency_ms ? pol.latency_ms.toFixed(0) + ' ms' : '--';
 
         // Smoothness
-        // Smoothness thresholds calibrated against real Cosmos3-Edge Action Policy
-        // output: base model predictions are 0.3-0.8; injected failures are ~1.2+
         const sm = pol.smoothness || 0;
         const cls = sm < 0.8 ? 'smooth-good' : sm < 1.0 ? 'smooth-warn' : 'smooth-bad';
         const lbl = sm < 0.8 ? 'plausible' : sm < 1.0 ? 'marginal' : 'jerky';
