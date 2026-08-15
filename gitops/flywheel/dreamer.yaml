@@ -248,9 +248,14 @@ data:
             f"  watching {CURATED_DIR}",
             flush=True,
         )
+        SENT_DIR = pathlib.Path(os.environ.get("SENT_DIR", "/data/episodes/sent"))
         processed = 0
         while True:
+            # Check curated first, then sent (sync-agent moves episodes there
+            # after upload, so curated/ may be empty by the time dreamer runs)
             episodes = sorted(CURATED_DIR.glob("*.json"))
+            if not episodes and SENT_DIR.exists():
+                episodes = sorted(SENT_DIR.glob("*.json"))
             # Only process episodes that don't yet have a dream video
             pending  = [
                 p for p in episodes
