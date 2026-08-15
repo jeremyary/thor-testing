@@ -25,7 +25,7 @@ metadata:
   name: cosmos3-edge-green
   namespace: vllm
 spec:
-  replicas: 0
+  replicas: 1
   strategy:
     type: Recreate
   revisionHistoryLimit: 0
