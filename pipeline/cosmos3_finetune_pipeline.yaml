@@ -481,13 +481,16 @@ deploymentSpec:
           \                uv_bin, \"pip\", \"install\", \"--python\", venv_python,\n\
           \                \"diffusers @ git+https://github.com/huggingface/diffusers.git\"\
           ,\n            ], cwd=str(cf_dir), env=train_env, check=True)\n        \
-          \    # Verify Edge support (bypass transformers hub version check)\n   \
-          \         result = subprocess.run(\n                [venv_python, \"-c\"\
-          ,\n                 \"import transformers.utils.versions as v; \"\n    \
-          \             \"v.require_version = lambda *a, **k: None; \"\n         \
-          \        \"v.require_version_core = lambda *a, **k: None; \"\n         \
-          \        \"from diffusers import Cosmos3OmniTransformer; \"\n          \
-          \       \"import inspect; \"\n                 \"p = inspect.signature(Cosmos3OmniTransformer.__init__).parameters;\
+          \    # Verify Edge support (bypass transformers hub version check).\n  \
+          \          # Must neuter the check BEFORE transformers.__init__ runs, because\n\
+          \            # it imports dependency_versions_check at module scope. We\
+          \ do this\n            # by pre-loading a stub dependency_versions_check\
+          \ into sys.modules.\n            result = subprocess.run(\n            \
+          \    [venv_python, \"-c\",\n                 \"import types, sys; \"\n \
+          \                \"stub = types.ModuleType('transformers.dependency_versions_check');\
+          \ \"\n                 \"sys.modules['transformers.dependency_versions_check']\
+          \ = stub; \"\n                 \"from diffusers import Cosmos3OmniTransformer;\
+          \ \"\n                 \"import inspect; \"\n                 \"p = inspect.signature(Cosmos3OmniTransformer.__init__).parameters;\
           \ \"\n                 \"assert 'hidden_act' in p, f'missing hidden_act,\
           \ have {list(p)}'; \"\n                 \"print('[finetune] diffusers Edge\
           \ support verified')\"],\n                cwd=str(cf_dir), env=train_env,\
@@ -502,16 +505,16 @@ deploymentSpec:
           \ # diffusers main installed hub v1.x. The actual APIs used by the\n   \
           \     # convert script (AutoConfig, AutoTokenizer) work fine with hub v1.x.\n\
           \        wrapper = scratch / \"_convert_wrapper.py\"\n        wrapper.write_text(\n\
-          \            \"import transformers.dependency_versions_check as _dvc\\n\"\
-          \n            \"# Suppress the hub version check that was already run at\
-          \ install time\\n\"\n            \"import transformers.utils.versions as\
-          \ _v\\n\"\n            \"_orig = _v.require_version\\n\"\n            \"\
-          def _patched(req, hint=None):\\n\"\n            \"    if 'huggingface' in\
-          \ req: return\\n\"\n            \"    return _orig(req, hint)\\n\"\n   \
-          \         \"_v.require_version = _patched\\n\"\n            \"_v.require_version_core\
-          \ = lambda req: _patched(req)\\n\"\n            \"# Now run the actual converter\\\
-          n\"\n            \"from cosmos_framework.scripts.convert_model_to_diffusers\
-          \ import main\\n\"\n            \"main()\\n\"\n        )\n        subprocess.run([\n\
+          \            \"# Neuter transformers' hub version check before anything\
+          \ imports transformers.\\n\"\n            \"# transformers.__init__ imports\
+          \ dependency_versions_check at module scope,\\n\"\n            \"# which\
+          \ hard-errors on huggingface-hub>=1.0. Pre-load a stub module so the\\n\"\
+          \n            \"# real check never runs.\\n\"\n            \"import types,\
+          \ sys\\n\"\n            \"stub = types.ModuleType('transformers.dependency_versions_check')\\\
+          n\"\n            \"sys.modules['transformers.dependency_versions_check']\
+          \ = stub\\n\"\n            \"# Now run the actual converter\\n\"\n     \
+          \       \"from cosmos_framework.scripts.convert_model_to_diffusers import\
+          \ main\\n\"\n            \"main()\\n\"\n        )\n        subprocess.run([\n\
           \            venv_python, str(wrapper),\n            \"--checkpoint-path\"\
           , str(scratch_export),\n            \"-o\",               str(scratch_diffusers),\n\
           \        ], cwd=str(cf_dir), env=train_env, check=True)\n        print(f\"\

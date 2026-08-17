@@ -398,12 +398,15 @@ def finetune_cosmos3(
                 uv_bin, "pip", "install", "--python", venv_python,
                 "diffusers @ git+https://github.com/huggingface/diffusers.git",
             ], cwd=str(cf_dir), env=train_env, check=True)
-            # Verify Edge support (bypass transformers hub version check)
+            # Verify Edge support (bypass transformers hub version check).
+            # Must neuter the check BEFORE transformers.__init__ runs, because
+            # it imports dependency_versions_check at module scope. We do this
+            # by pre-loading a stub dependency_versions_check into sys.modules.
             result = subprocess.run(
                 [venv_python, "-c",
-                 "import transformers.utils.versions as v; "
-                 "v.require_version = lambda *a, **k: None; "
-                 "v.require_version_core = lambda *a, **k: None; "
+                 "import types, sys; "
+                 "stub = types.ModuleType('transformers.dependency_versions_check'); "
+                 "sys.modules['transformers.dependency_versions_check'] = stub; "
                  "from diffusers import Cosmos3OmniTransformer; "
                  "import inspect; "
                  "p = inspect.signature(Cosmos3OmniTransformer.__init__).parameters; "
@@ -423,15 +426,13 @@ def finetune_cosmos3(
         # convert script (AutoConfig, AutoTokenizer) work fine with hub v1.x.
         wrapper = scratch / "_convert_wrapper.py"
         wrapper.write_text(
-            "import transformers.dependency_versions_check as _dvc\n"
-            "# Suppress the hub version check that was already run at install time\n"
-            "import transformers.utils.versions as _v\n"
-            "_orig = _v.require_version\n"
-            "def _patched(req, hint=None):\n"
-            "    if 'huggingface' in req: return\n"
-            "    return _orig(req, hint)\n"
-            "_v.require_version = _patched\n"
-            "_v.require_version_core = lambda req: _patched(req)\n"
+            "# Neuter transformers' hub version check before anything imports transformers.\n"
+            "# transformers.__init__ imports dependency_versions_check at module scope,\n"
+            "# which hard-errors on huggingface-hub>=1.0. Pre-load a stub module so the\n"
+            "# real check never runs.\n"
+            "import types, sys\n"
+            "stub = types.ModuleType('transformers.dependency_versions_check')\n"
+            "sys.modules['transformers.dependency_versions_check'] = stub\n"
             "# Now run the actual converter\n"
             "from cosmos_framework.scripts.convert_model_to_diffusers import main\n"
             "main()\n"
