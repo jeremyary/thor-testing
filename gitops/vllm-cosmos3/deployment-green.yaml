@@ -49,7 +49,7 @@ spec:
       # is valid/deployable from the start even before a real promotion.
       initContainers:
         - name: fetch-model
-          image: default-route-openshift-image-registry.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com/thor-builds/cosmos3-edge-modelcar@sha256:352aee11a080bec8c6c1bf9e5b61900f070065e5b1f17f3784a1b7d37c263252
+          image: default-route-openshift-image-registry.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com/thor-builds/cosmos3-edge-modelcar@sha256:a0b2102d6b79d8d1d1777b04eb74138ceef411f5a4d6b467e1bfe237689724a2
           imagePullPolicy: IfNotPresent
           command: ["bash", "-c", "cp -a /models/huggingface/. /hf-cache/"]
           volumeMounts:
