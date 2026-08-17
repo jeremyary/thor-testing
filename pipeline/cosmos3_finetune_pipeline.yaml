@@ -332,12 +332,17 @@ deploymentSpec:
           \n    env = os.environ.copy()\n    env.update({\n        \"HOME\":   str(home),\n\
           \        \"HF_HOME\": str(hf_home),\n        \"PATH\":   f\"{scratch}/bin:{home}/.local/bin:{env.get('PATH',\
           \ '')}\",\n        \"PYTORCH_ALLOC_CONF\": \"expandable_segments:True\"\
-          ,  # D032-A memory fix\n    })\n\n    # Install uv\n    subprocess.run([sys.executable,\
-          \ \"-m\", \"pip\", \"install\", \"--user\", \"uv\"],\n                 \
-          \  env=env, check=True, capture_output=True)\n\n    # Install ffmpeg + ffprobe\
-          \ (static build -- can't apt-get as non-root in\n    # OpenShift). The cosmos-framework\
-          \ video dataloader shells out to BOTH:\n    # ffprobe for metadata and ffmpeg\
-          \ for decoding the .mp4 clips.\n    ffbin = scratch / \"bin\"\n    ffbin.mkdir(exist_ok=True)\n\
+          ,  # D032-A memory fix\n        # Disable Xet-backed downloads: the Wan2.2\
+          \ Diffusers VAE repo is\n        # Xet-stored, and huggingface_hub errors\
+          \ without the hf_xet package\n        # (not installed). Plain HTTPS downloads\
+          \ work fine. Matches the Tekton\n        # modelcar pipeline's HF_HUB_DISABLE_XET=1.\n\
+          \        \"HF_HUB_DISABLE_XET\": \"1\",\n    })\n\n    # Install uv\n  \
+          \  subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--user\"\
+          , \"uv\"],\n                   env=env, check=True, capture_output=True)\n\
+          \n    # Install ffmpeg + ffprobe (static build -- can't apt-get as non-root\
+          \ in\n    # OpenShift). The cosmos-framework video dataloader shells out\
+          \ to BOTH:\n    # ffprobe for metadata and ffmpeg for decoding the .mp4\
+          \ clips.\n    ffbin = scratch / \"bin\"\n    ffbin.mkdir(exist_ok=True)\n\
           \    if not (ffbin / \"ffmpeg\").exists() or not (ffbin / \"ffprobe\").exists():\n\
           \        print(\"[finetune] installing static ffmpeg + ffprobe...\")\n \
           \       subprocess.run([\n            \"sh\", \"-c\",\n            f\"curl\
@@ -546,27 +551,51 @@ deploymentSpec:
           \ text=True)\n        if result.returncode != 0:\n            print(f\"\
           [finetune] verify FAILED:\\n{result.stdout}\\n{result.stderr}\")\n     \
           \       raise RuntimeError(\"diffusers/transformers env not ready for Edge\
-          \ convert\")\n        print(result.stdout.strip())\n\n        print(f\"\
-          [finetune] Step 6b: converting to diffusers -> {scratch_diffusers}...\"\
-          )\n        # Use venv python directly (not uv run) so the lockfile doesn't\
-          \ re-sync\n        # and revert the diffusers main install.\n        subprocess.run([\n\
-          \            venv_python, str(wrapper),\n            \"--checkpoint-path\"\
-          , str(scratch_export),\n            \"-o\",               str(scratch_diffusers),\n\
-          \        ], cwd=str(cf_dir), env=train_env, check=True)\n        print(f\"\
-          [finetune] diffusers conversion produced {sum(1 for _ in scratch_diffusers.rglob('*'))}\
-          \ files\")\n\n        # Free the intermediate export now that diffusers\
-          \ conversion is done\n        _cleanup.rmtree(scratch_export)\n        print(\"\
-          [finetune] freed intermediate export from scratch\")\n\n        # Copy Diffusers-format\
-          \ output into the KFP artifact path\n        export_path = out_dir / \"\
-          model\"\n        export_path.mkdir(parents=True, exist_ok=True)\n      \
-          \  import shutil as _sc\n        for item in scratch_diffusers.iterdir():\n\
-          \            dest = export_path / item.name\n            if item.is_dir():\n\
-          \                _sc.copytree(item, dest)\n            else:\n         \
-          \       _sc.copy2(item, dest)\n            print(f\"[finetune]   copied\
-          \ {item.name} {'(dir)' if item.is_dir() else f'({item.stat().st_size} bytes)'}\"\
-          )\n        print(f\"[finetune] {sum(1 for _ in export_path.rglob('*'))}\
-          \ files in artifact\")\n\n        # Parse final loss -- prefer captured\
-          \ stdout, fall back to the\n        # launcher's log file under $OUTPUT_ROOT/logs/.\n\
+          \ convert\")\n        print(result.stdout.strip())\n\n        # Pre-download\
+          \ the Diffusers-format Wan2.2 VAE into the HF cache. The\n        # converter\
+          \ builds a diffusers AutoencoderKLWan via\n        # AutoencoderKLWan.from_pretrained(\"\
+          Wan-AI/Wan2.2-TI2V-5B-Diffusers\").\n        # diffusers' own from_pretrained\
+          \ HTTP path fails to reach the Hub from\n        # this pod (\"couldn't\
+          \ connect\"), then falls back to a non-existent .bin\n        # and hard-fails\
+          \ -- even though the cosmos-framework `hf download` CLI\n        # and huggingface_hub\
+          \ both CAN reach the Hub. So we pre-fetch the vae/\n        # subfolder\
+          \ with huggingface_hub (authenticated via HF_TOKEN), then run\n        #\
+          \ the convert with HF_HUB_OFFLINE=1 so diffusers reads from the local\n\
+          \        # cache instead of hitting the network.\n        print(\"[finetune]\
+          \ pre-downloading Wan2.2 Diffusers VAE into HF cache...\")\n        dl =\
+          \ subprocess.run(\n            [venv_python, \"-c\",\n             \"from\
+          \ huggingface_hub import snapshot_download; \"\n             \"p = snapshot_download('Wan-AI/Wan2.2-TI2V-5B-Diffusers',\
+          \ \"\n             \"allow_patterns=['vae/*']); \"\n             \"print('[finetune]\
+          \ VAE cached at', p)\"],\n            cwd=str(cf_dir), env=train_env, capture_output=True,\
+          \ text=True)\n        print(dl.stdout.strip())\n        if dl.returncode\
+          \ != 0:\n            print(f\"[finetune] VAE pre-download FAILED:\\n{dl.stderr}\"\
+          )\n            raise RuntimeError(\"could not pre-cache Wan2.2 Diffusers\
+          \ VAE\")\n\n        print(f\"[finetune] Step 6b: converting to diffusers\
+          \ -> {scratch_diffusers}...\")\n        # Use venv python directly (not\
+          \ uv run) so the lockfile doesn't re-sync\n        # and revert the diffusers\
+          \ main install. The VAE is now pre-cached via\n        # huggingface_hub,\
+          \ so diffusers' from_pretrained finds it locally; other\n        # repos\
+          \ (reasoner, tokenizer) were fully fetched by export_model. We do\n    \
+          \    # NOT force HF_HUB_OFFLINE so any remaining small metadata fetches\
+          \ can\n        # still succeed via huggingface_hub's working network path.\n\
+          \        subprocess.run([\n            venv_python, str(wrapper),\n    \
+          \        \"--checkpoint-path\", str(scratch_export),\n            \"-o\"\
+          ,               str(scratch_diffusers),\n        ], cwd=str(cf_dir), env=train_env,\
+          \ check=True)\n        print(f\"[finetune] diffusers conversion produced\
+          \ {sum(1 for _ in scratch_diffusers.rglob('*'))} files\")\n\n        # Free\
+          \ the intermediate export now that diffusers conversion is done\n      \
+          \  _cleanup.rmtree(scratch_export)\n        print(\"[finetune] freed intermediate\
+          \ export from scratch\")\n\n        # Copy Diffusers-format output into\
+          \ the KFP artifact path\n        export_path = out_dir / \"model\"\n   \
+          \     export_path.mkdir(parents=True, exist_ok=True)\n        import shutil\
+          \ as _sc\n        for item in scratch_diffusers.iterdir():\n           \
+          \ dest = export_path / item.name\n            if item.is_dir():\n      \
+          \          _sc.copytree(item, dest)\n            else:\n               \
+          \ _sc.copy2(item, dest)\n            print(f\"[finetune]   copied {item.name}\
+          \ {'(dir)' if item.is_dir() else f'({item.stat().st_size} bytes)'}\")\n\
+          \        print(f\"[finetune] {sum(1 for _ in export_path.rglob('*'))} files\
+          \ in artifact\")\n\n        # Parse final loss -- prefer captured stdout,\
+          \ fall back to the\n        # launcher's log file under $OUTPUT_ROOT/logs/.\n\
           \        loss_sources = [train_stdout]\n        log_dir = scratch / \"outputs\"\
           \ / \"train\" / \"logs\"\n        loss_sources += [p.read_text() for p in\
           \ log_dir.glob(\"*.log\")] if log_dir.exists() else []\n        for text\

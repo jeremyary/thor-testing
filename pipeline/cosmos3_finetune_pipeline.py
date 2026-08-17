@@ -192,6 +192,11 @@ def finetune_cosmos3(
         "HF_HOME": str(hf_home),
         "PATH":   f"{scratch}/bin:{home}/.local/bin:{env.get('PATH', '')}",
         "PYTORCH_ALLOC_CONF": "expandable_segments:True",  # D032-A memory fix
+        # Disable Xet-backed downloads: the Wan2.2 Diffusers VAE repo is
+        # Xet-stored, and huggingface_hub errors without the hf_xet package
+        # (not installed). Plain HTTPS downloads work fine. Matches the Tekton
+        # modelcar pipeline's HF_HUB_DISABLE_XET=1.
+        "HF_HUB_DISABLE_XET": "1",
     })
 
     # Install uv
@@ -479,9 +484,36 @@ def finetune_cosmos3(
             raise RuntimeError("diffusers/transformers env not ready for Edge convert")
         print(result.stdout.strip())
 
+        # Pre-download the Diffusers-format Wan2.2 VAE into the HF cache. The
+        # converter builds a diffusers AutoencoderKLWan via
+        # AutoencoderKLWan.from_pretrained("Wan-AI/Wan2.2-TI2V-5B-Diffusers").
+        # diffusers' own from_pretrained HTTP path fails to reach the Hub from
+        # this pod ("couldn't connect"), then falls back to a non-existent .bin
+        # and hard-fails -- even though the cosmos-framework `hf download` CLI
+        # and huggingface_hub both CAN reach the Hub. So we pre-fetch the vae/
+        # subfolder with huggingface_hub (authenticated via HF_TOKEN), then run
+        # the convert with HF_HUB_OFFLINE=1 so diffusers reads from the local
+        # cache instead of hitting the network.
+        print("[finetune] pre-downloading Wan2.2 Diffusers VAE into HF cache...")
+        dl = subprocess.run(
+            [venv_python, "-c",
+             "from huggingface_hub import snapshot_download; "
+             "p = snapshot_download('Wan-AI/Wan2.2-TI2V-5B-Diffusers', "
+             "allow_patterns=['vae/*']); "
+             "print('[finetune] VAE cached at', p)"],
+            cwd=str(cf_dir), env=train_env, capture_output=True, text=True)
+        print(dl.stdout.strip())
+        if dl.returncode != 0:
+            print(f"[finetune] VAE pre-download FAILED:\n{dl.stderr}")
+            raise RuntimeError("could not pre-cache Wan2.2 Diffusers VAE")
+
         print(f"[finetune] Step 6b: converting to diffusers -> {scratch_diffusers}...")
         # Use venv python directly (not uv run) so the lockfile doesn't re-sync
-        # and revert the diffusers main install.
+        # and revert the diffusers main install. The VAE is now pre-cached via
+        # huggingface_hub, so diffusers' from_pretrained finds it locally; other
+        # repos (reasoner, tokenizer) were fully fetched by export_model. We do
+        # NOT force HF_HUB_OFFLINE so any remaining small metadata fetches can
+        # still succeed via huggingface_hub's working network path.
         subprocess.run([
             venv_python, str(wrapper),
             "--checkpoint-path", str(scratch_export),
