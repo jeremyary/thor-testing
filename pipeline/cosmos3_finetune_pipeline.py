@@ -553,9 +553,14 @@ def finetune_cosmos3(
                 break
     else:
         print("[finetune] no checkpoint found -- training failed")
+        ckpt_iter = "none"
         export_path = out_dir / "model"
         export_path.mkdir(parents=True, exist_ok=True)
 
+    # Use the ckpt_iter captured before Step 6a cleanup -- ckpt_ptr itself lives
+    # under run_subdir/checkpoints/, which the post-export cleanup deletes to
+    # free scratch space, so re-reading it here would spuriously report "none"
+    # and fail Gate 1 even on a successful run.
     meta = {
         "model_id":         model_id,
         "framework":        "cosmos-framework",
@@ -564,7 +569,7 @@ def finetune_cosmos3(
         "max_steps":        max_steps,
         "max_tokens":       24576,
         "final_loss":       final_loss,
-        "checkpoint_iter":  ckpt_ptr.read_text().strip() if ckpt_ptr.exists() else "none",
+        "checkpoint_iter":  ckpt_iter,
         "export_path":      str(export_path),
         "decision":         "D032-A",
     }

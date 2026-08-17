@@ -604,15 +604,19 @@ deploymentSpec:
           \        if m:\n                    final_loss = float(m.group(1))\n   \
           \                 break\n            if final_loss > 0:\n              \
           \  break\n    else:\n        print(\"[finetune] no checkpoint found -- training\
-          \ failed\")\n        export_path = out_dir / \"model\"\n        export_path.mkdir(parents=True,\
-          \ exist_ok=True)\n\n    meta = {\n        \"model_id\":         model_id,\n\
-          \        \"framework\":        \"cosmos-framework\",\n        \"recipe\"\
-          :           \"vision_sft_edge (launch_sft_vision_edge.sh)\",\n        \"\
-          cf_sha\":           cf_sha,\n        \"max_steps\":        max_steps,\n\
-          \        \"max_tokens\":       24576,\n        \"final_loss\":       final_loss,\n\
-          \        \"checkpoint_iter\":  ckpt_ptr.read_text().strip() if ckpt_ptr.exists()\
-          \ else \"none\",\n        \"export_path\":      str(export_path),\n    \
-          \    \"decision\":         \"D032-A\",\n    }\n    (out_dir / \"training_meta.json\"\
+          \ failed\")\n        ckpt_iter = \"none\"\n        export_path = out_dir\
+          \ / \"model\"\n        export_path.mkdir(parents=True, exist_ok=True)\n\n\
+          \    # Use the ckpt_iter captured before Step 6a cleanup -- ckpt_ptr itself\
+          \ lives\n    # under run_subdir/checkpoints/, which the post-export cleanup\
+          \ deletes to\n    # free scratch space, so re-reading it here would spuriously\
+          \ report \"none\"\n    # and fail Gate 1 even on a successful run.\n   \
+          \ meta = {\n        \"model_id\":         model_id,\n        \"framework\"\
+          :        \"cosmos-framework\",\n        \"recipe\":           \"vision_sft_edge\
+          \ (launch_sft_vision_edge.sh)\",\n        \"cf_sha\":           cf_sha,\n\
+          \        \"max_steps\":        max_steps,\n        \"max_tokens\":     \
+          \  24576,\n        \"final_loss\":       final_loss,\n        \"checkpoint_iter\"\
+          :  ckpt_iter,\n        \"export_path\":      str(export_path),\n       \
+          \ \"decision\":         \"D032-A\",\n    }\n    (out_dir / \"training_meta.json\"\
           ).write_text(json.dumps(meta, indent=2))\n    print(f\"[finetune] done --\
           \ loss={final_loss:.4f} export={export_path}\")\n    return float(final_loss)\n\
           \n"
