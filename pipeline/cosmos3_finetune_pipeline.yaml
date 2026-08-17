@@ -464,57 +464,71 @@ deploymentSpec:
           \ (safetensors -> Diffusers layout)\n        scratch_diffusers = scratch\
           \ / \"diffusers_model\"\n        if scratch_diffusers.exists():\n      \
           \      _cleanup.rmtree(scratch_diffusers)\n        # Step 6b requires diffusers\
-          \ with Edge transformer support (hidden_act,\n        # qk_norm_for_text\
-          \ on Cosmos3OmniTransformer). PyPI diffusers 0.39.0\n        # predates\
-          \ this; diffusers main has it but needs huggingface-hub>=1.23.\n       \
-          \ # This conflicts with transformers 4.x (hub<1.0) which cosmos-framework\n\
-          \        # requires (transformers 5.x breaks cosmos-framework internals).\n\
-          \        #\n        # Resolution: install diffusers main (which pulls hub>=1.23),\
-          \ keep\n        # transformers 4.x, and set TRANSFORMERS_NO_DEPENDENCY_CHECK=1\
-          \ to\n        # suppress transformers' runtime hub version check. The convert\
-          \ step\n        # only uses basic transformers APIs (AutoConfig, AutoTokenizer)\
-          \ that\n        # work fine with hub v1.x despite the version pin.\n   \
-          \     venv_python = str(cf_dir / \".venv\" / \"bin\" / \"python\")\n   \
-          \     diffusers_marker = cf_dir / \".venv\" / \".diffusers-edge-ok\"\n \
-          \       if not diffusers_marker.exists():\n            print(\"[finetune]\
-          \ upgrading diffusers for Edge convert...\")\n            subprocess.run([\n\
-          \                uv_bin, \"pip\", \"install\", \"--python\", venv_python,\n\
-          \                \"diffusers @ git+https://github.com/huggingface/diffusers.git\"\
-          ,\n            ], cwd=str(cf_dir), env=train_env, check=True)\n        \
-          \    # Verify Edge support (bypass transformers hub version check).\n  \
-          \          # Must neuter the check BEFORE transformers.__init__ runs, because\n\
-          \            # it imports dependency_versions_check at module scope. We\
-          \ do this\n            # by pre-loading a stub dependency_versions_check\
-          \ into sys.modules.\n            result = subprocess.run(\n            \
-          \    [venv_python, \"-c\",\n                 \"import types, sys; \"\n \
-          \                \"stub = types.ModuleType('transformers.dependency_versions_check');\
-          \ \"\n                 \"sys.modules['transformers.dependency_versions_check']\
-          \ = stub; \"\n                 \"from diffusers import Cosmos3OmniTransformer;\
-          \ \"\n                 \"import inspect; \"\n                 \"p = inspect.signature(Cosmos3OmniTransformer.__init__).parameters;\
-          \ \"\n                 \"assert 'hidden_act' in p, f'missing hidden_act,\
-          \ have {list(p)}'; \"\n                 \"print('[finetune] diffusers Edge\
-          \ support verified')\"],\n                cwd=str(cf_dir), env=train_env,\
-          \ capture_output=True, text=True)\n            if result.returncode != 0:\n\
-          \                print(f\"[finetune] verify FAILED: {result.stderr}\")\n\
-          \                raise RuntimeError(\"diffusers upgrade did not provide\
-          \ Edge support\")\n            print(result.stdout.strip())\n          \
-          \  diffusers_marker.write_text(\"ok\")\n\n        print(f\"[finetune] Step\
-          \ 6b: converting to diffusers -> {scratch_diffusers}...\")\n        # Wrap\
-          \ the convert call to bypass transformers' hub version check.\n        #\
-          \ transformers 4.57.x hard-errors on huggingface-hub>=1.0, but\n       \
-          \ # diffusers main installed hub v1.x. The actual APIs used by the\n   \
-          \     # convert script (AutoConfig, AutoTokenizer) work fine with hub v1.x.\n\
-          \        wrapper = scratch / \"_convert_wrapper.py\"\n        wrapper.write_text(\n\
-          \            \"# Neuter transformers' hub version check before anything\
-          \ imports transformers.\\n\"\n            \"# transformers.__init__ imports\
-          \ dependency_versions_check at module scope,\\n\"\n            \"# which\
-          \ hard-errors on huggingface-hub>=1.0. Pre-load a stub module so the\\n\"\
-          \n            \"# real check never runs.\\n\"\n            \"import types,\
-          \ sys\\n\"\n            \"stub = types.ModuleType('transformers.dependency_versions_check')\\\
-          n\"\n            \"sys.modules['transformers.dependency_versions_check']\
-          \ = stub\\n\"\n            \"# Now run the actual converter\\n\"\n     \
-          \       \"from cosmos_framework.scripts.convert_model_to_diffusers import\
-          \ main\\n\"\n            \"main()\\n\"\n        )\n        subprocess.run([\n\
+          \ with Cosmos3 Edge transformer support\n        # (the hidden_act / qk_norm_for_text\
+          \ constructor args on\n        # Cosmos3OmniTransformer). PyPI diffusers\
+          \ 0.39.0 -- which\n        # cosmos-framework's uv.lock pins -- predates\
+          \ this; Edge support only\n        # landed on diffusers main (commit db44fe6,\
+          \ post-0.39.0 release).\n        #\n        # Cosmos3 Edge support (Cosmos3OmniTransformer,\
+          \ Cosmos3OmniPipeline)\n        # only exists on diffusers main (post-0.39.0).\
+          \ diffusers main genuinely\n        # requires huggingface-hub>=1.23 --\
+          \ its pipeline_utils imports\n        # get_cached_repo_tree, which was\
+          \ first added in hub 1.23.0 (verified,\n        # not a conservative pin).\
+          \ This conflicts with transformers 4.57.x,\n        # which pins hub<1.0\
+          \ and is required by cosmos-framework (transformers\n        # 5.x breaks\
+          \ cosmos-framework internals like the qwen3_vl processor).\n        #\n\
+          \        # The ONLY incompatibility between transformers 4.57 and hub 1.x\
+          \ is\n        # transformers' own runtime version *check* (dependency_versions_check),\n\
+          \        # which hard-errors at import. The actual transformers APIs the\
+          \ convert\n        # script uses work fine with hub 1.x. So we:\n      \
+          \  #   1. install diffusers main + hub>=1.23 (--no-deps to avoid pulling\n\
+          \        #      transformers 5.x), keeping cosmos-framework's transformers\
+          \ 4.57;\n        #   2. run the converter through a wrapper that pre-loads\
+          \ a *working*\n        #      stub of transformers.dependency_versions_check\
+          \ (providing the\n        #      dep_version_check no-op that transformers'\
+          \ own modules import)\n        #      into sys.modules before transformers\
+          \ is first imported, so the\n        #      hub version check never runs.\n\
+          \        #\n        # Verified empirically in a pod against a real exported\
+          \ checkpoint:\n        # hub 1.27.0 + transformers 4.57.6 + diffusers 0.40.0.dev0\
+          \ import\n        # cleanly, Cosmos3OmniPipeline loads, and the converter\
+          \ reaches model\n        # instantiation. NOT marker-gated: training's `uv\
+          \ run` re-syncs the\n        # lockfile (diffusers 0.39.0 / hub 0.36) every\
+          \ run, so we reinstall\n        # after training each time.\n        venv_python\
+          \ = str(cf_dir / \".venv\" / \"bin\" / \"python\")\n        print(\"[finetune]\
+          \ installing diffusers main + hub>=1.23 for Edge convert...\")\n       \
+          \ subprocess.run([\n            uv_bin, \"pip\", \"install\", \"--python\"\
+          , venv_python, \"--no-deps\",\n            \"huggingface-hub>=1.23,<2.0\"\
+          ,\n            \"diffusers @ git+https://github.com/huggingface/diffusers.git\"\
+          ,\n        ], cwd=str(cf_dir), env=train_env, check=True)\n\n        # Wrapper\
+          \ that neutralizes transformers' hub version check (a working\n        #\
+          \ stub, not an empty module -- transformers imports dep_version_check\n\
+          \        # from it) before importing the converter, then runs it.\n    \
+          \    wrapper = scratch / \"_convert_wrapper.py\"\n        wrapper.write_text(\n\
+          \            \"import types, sys\\n\"\n            \"_stub = types.ModuleType('transformers.dependency_versions_check')\\\
+          n\"\n            \"_stub.dep_version_check = lambda *a, **k: None\\n\"\n\
+          \            \"sys.modules['transformers.dependency_versions_check'] = _stub\\\
+          n\"\n            \"from cosmos_framework.scripts.convert_model_to_diffusers\
+          \ import main\\n\"\n            \"main()\\n\"\n        )\n\n        # Verify\
+          \ the full import chain + Edge support before the real convert.\n      \
+          \  result = subprocess.run(\n            [venv_python, \"-c\",\n       \
+          \      \"import types, sys; \"\n             \"_s = types.ModuleType('transformers.dependency_versions_check');\
+          \ \"\n             \"_s.dep_version_check = lambda *a, **k: None; \"\n \
+          \            \"sys.modules['transformers.dependency_versions_check'] = _s;\
+          \ \"\n             \"import huggingface_hub, transformers, diffusers; \"\
+          \n             \"from diffusers import Cosmos3OmniTransformer, Cosmos3OmniPipeline;\
+          \ \"\n             \"from cosmos_framework.scripts.convert_model_to_diffusers\
+          \ import main; \"\n             \"import inspect; \"\n             \"p =\
+          \ inspect.signature(Cosmos3OmniTransformer.__init__).parameters; \"\n  \
+          \           \"assert 'hidden_act' in p, f'missing hidden_act, have {list(p)}';\
+          \ \"\n             \"print(f'[finetune] verified: hub={huggingface_hub.__version__}\
+          \ \"\n             \"tf={transformers.__version__} diffusers={diffusers.__version__}\
+          \ Edge=OK')\"],\n            cwd=str(cf_dir), env=train_env, capture_output=True,\
+          \ text=True)\n        if result.returncode != 0:\n            print(f\"\
+          [finetune] verify FAILED:\\n{result.stdout}\\n{result.stderr}\")\n     \
+          \       raise RuntimeError(\"diffusers/transformers env not ready for Edge\
+          \ convert\")\n        print(result.stdout.strip())\n\n        print(f\"\
+          [finetune] Step 6b: converting to diffusers -> {scratch_diffusers}...\"\
+          )\n        # Use venv python directly (not uv run) so the lockfile doesn't\
+          \ re-sync\n        # and revert the diffusers main install.\n        subprocess.run([\n\
           \            venv_python, str(wrapper),\n            \"--checkpoint-path\"\
           , str(scratch_export),\n            \"-o\",               str(scratch_diffusers),\n\
           \        ], cwd=str(cf_dir), env=train_env, check=True)\n        print(f\"\
