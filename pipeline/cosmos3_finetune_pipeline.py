@@ -980,6 +980,10 @@ def cosmos3_finetune_pipeline(
         model_id      = model_id,
         max_steps     = max_steps,
     )
+    # Disable KFP caching for the finetune step -- the same inputs can produce
+    # different outputs depending on scratch PVC state, and a cached "no
+    # checkpoint" result from a failed run poisons subsequent attempts.
+    finetune_task.set_caching_options(False)
     # GPU resource request -- Kueue queues this until L40S node is available (scale-from-zero)
     finetune_task.set_accelerator_type("nvidia.com/gpu").set_accelerator_limit(1)
     # Kueue queue label (matches the robotics-train LocalQueue in vla-training namespace)

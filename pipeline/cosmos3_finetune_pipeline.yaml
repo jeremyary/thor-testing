@@ -946,8 +946,7 @@ root:
         taskInfo:
           name: evaluate
       finetune-cosmos3:
-        cachingOptions:
-          enableCache: true
+        cachingOptions: {}
         componentRef:
           name: comp-finetune-cosmos3
         dependentTasks:
