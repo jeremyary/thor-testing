@@ -235,6 +235,23 @@ def finetune_cosmos3(
             uv_bin, "sync", "--all-extras", "--group=cu130-train",
         ], cwd=str(cf_dir), env=env, check=True, capture_output=True)
 
+    # Step 2b: Upgrade diffusers to main branch for Edge support.
+    # The PyPI release (0.39.0) predates Cosmos3 Edge transformer support
+    # (hidden_act, qk_norm_for_text args on Cosmos3OmniTransformer).
+    # convert_model_to_diffusers validates these at runtime and refuses to
+    # produce a broken checkpoint without them. Training itself uses
+    # cosmos-framework's own model code (not diffusers), so this upgrade
+    # only affects the post-training conversion step.
+    diffusers_marker = cf_dir / ".venv" / ".diffusers-upgraded"
+    if not diffusers_marker.exists():
+        print("[finetune] upgrading diffusers to main (Edge transformer support)...")
+        subprocess.run([
+            uv_bin, "pip", "install",
+            "diffusers @ git+https://github.com/huggingface/diffusers.git",
+        ], cwd=str(cf_dir), env=env, check=True, capture_output=True)
+        diffusers_marker.write_text("upgraded")
+        print("[finetune] diffusers upgraded")
+
     # -----------------------------------------------------------------------
     # Step 3: Convert HF checkpoint to DCP (required for Vision SFT)
     # -----------------------------------------------------------------------
