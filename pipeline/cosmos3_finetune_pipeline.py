@@ -797,11 +797,25 @@ _Opened automatically by the cosmos3_finetune_pipeline (cosmos-framework Vision 
 
     repo.update_file(
         gitops_green_file,
-        f"promote: cosmos3-edge {model_version} modelcar digest",
-        new_yaml,
+        f"promote: cosmos3-edge {model_version} modelcar digest + green replicas=1",
+        new_yaml.replace("replicas: 0", "replicas: 1", 1),
         file_content.sha,
         branch=branch_name,
     )
+
+    # Also set blue deployment to replicas=0 (Argo selfHeal prevents manual
+    # oc scale, so the replica flip MUST be in git for the merge to work).
+    blue_file = "gitops/vllm-cosmos3/deployment.yaml"
+    blue_content = repo.get_contents(blue_file, ref=branch_name)
+    blue_yaml = blue_content.decoded_content.decode()
+    repo.update_file(
+        blue_file,
+        f"promote: blue replicas=0 (green takes over)",
+        blue_yaml.replace("replicas: 1", "replicas: 0", 1),
+        blue_content.sha,
+        branch=branch_name,
+    )
+
     pr = repo.create_pull(
         title=f"[promote] cosmos3-edge {model_version}",
         body=pr_body,
