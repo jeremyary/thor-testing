@@ -372,24 +372,11 @@ deploymentSpec:
           \    #\n    # uv add fails due to transitive dependency conflict (diffusers\
           \ main\n    # needs huggingface-hub>=1.23, transformers pins <1.0). uv pip\
           \ install\n    # bypasses the resolver and installs directly into the venv.\n\
-          \    diffusers_marker = cf_dir / \".venv\" / \".diffusers-edge-ok\"\n  \
-          \  if not diffusers_marker.exists():\n        print(\"[finetune] upgrading\
-          \ diffusers to main (Edge transformer support)...\")\n        venv_python\
-          \ = str(cf_dir / \".venv\" / \"bin\" / \"python\")\n        subprocess.run([\n\
-          \            uv_bin, \"pip\", \"install\", \"--python\", venv_python,\n\
-          \            \"diffusers @ git+https://github.com/huggingface/diffusers.git\"\
-          ,\n        ], cwd=str(cf_dir), env=env, check=True)\n        # Verify the\
-          \ upgrade took effect\n        result = subprocess.run(\n            [venv_python,\
-          \ \"-c\",\n             \"from diffusers import Cosmos3OmniTransformer;\
-          \ \"\n             \"import inspect; \"\n             \"p = inspect.signature(Cosmos3OmniTransformer.__init__).parameters;\
-          \ \"\n             \"assert 'hidden_act' in p, f'missing hidden_act, have\
-          \ {list(p)}'; \"\n             \"print('[finetune] diffusers Edge support\
-          \ verified')\"],\n            cwd=str(cf_dir), env=env, capture_output=True,\
-          \ text=True)\n        if result.returncode != 0:\n            print(f\"\
-          [finetune] diffusers verify FAILED: {result.stderr}\")\n            raise\
-          \ RuntimeError(\"diffusers upgrade did not provide Edge support\")\n   \
-          \     print(result.stdout.strip())\n        diffusers_marker.write_text(\"\
-          upgraded\")\n        print(\"[finetune] diffusers upgraded\")\n\n    # -----------------------------------------------------------------------\n\
+          \    # Step 2b is deferred until after training (Step 6b) -- see below.\n\
+          \    # The diffusers + transformers upgrade for Edge support is only needed\n\
+          \    # by convert_model_to_diffusers, not by training itself. Installing\
+          \ it\n    # here would break the uv-managed lockfile that training depends\
+          \ on.\n\n    # -----------------------------------------------------------------------\n\
           \    # Step 3: Convert HF checkpoint to DCP (required for Vision SFT)\n\
           \    # -----------------------------------------------------------------------\n\
           \    dcp_dir = cf_dir / \"examples\" / \"checkpoints\" / \"Cosmos3-Edge\"\
@@ -476,19 +463,43 @@ deploymentSpec:
           \ freed training checkpoints from scratch\")\n\n        # Step 6b: convert_model_to_diffusers\
           \ (safetensors -> Diffusers layout)\n        scratch_diffusers = scratch\
           \ / \"diffusers_model\"\n        if scratch_diffusers.exists():\n      \
-          \      _cleanup.rmtree(scratch_diffusers)\n        print(f\"[finetune] Step\
-          \ 6b: converting to diffusers -> {scratch_diffusers}...\")\n        # Use\
-          \ venv python directly -- uv run re-syncs from the lockfile which\n    \
-          \    # re-pins diffusers==0.39.0, undoing the Step 2b pip upgrade.\n   \
-          \     venv_python = str(cf_dir / \".venv\" / \"bin\" / \"python\")\n   \
-          \     subprocess.run([\n            venv_python, \"-m\",\n            \"\
-          cosmos_framework.scripts.convert_model_to_diffusers\",\n            \"--checkpoint-path\"\
-          , str(scratch_export),\n            \"-o\",               str(scratch_diffusers),\n\
-          \        ], cwd=str(cf_dir), env=train_env, check=True)\n        print(f\"\
-          [finetune] diffusers conversion produced {sum(1 for _ in scratch_diffusers.rglob('*'))}\
-          \ files\")\n\n        # Free the intermediate export now that diffusers\
-          \ conversion is done\n        _cleanup.rmtree(scratch_export)\n        print(\"\
-          [finetune] freed intermediate export from scratch\")\n\n        # Copy Diffusers-format\
+          \      _cleanup.rmtree(scratch_diffusers)\n        # Step 6b requires diffusers\
+          \ with Edge transformer support (hidden_act,\n        # qk_norm_for_text\
+          \ on Cosmos3OmniTransformer). PyPI diffusers 0.39.0\n        # predates\
+          \ this; diffusers main has it but needs huggingface-hub>=1.23\n        #\
+          \ and transformers>=5.0. These conflict with cosmos-framework's lockfile\n\
+          \        # (transformers<5, hub<1.0), so we install them AFTER training\
+          \ is done,\n        # directly into the venv via pip (bypassing uv's resolver).\
+          \ The convert\n        # step uses the venv python directly (not uv run)\
+          \ to avoid the lockfile\n        # re-syncing and reverting the upgrade.\n\
+          \        venv_python = str(cf_dir / \".venv\" / \"bin\" / \"python\")\n\
+          \        diffusers_marker = cf_dir / \".venv\" / \".diffusers-edge-ok\"\n\
+          \        if not diffusers_marker.exists():\n            print(\"[finetune]\
+          \ upgrading diffusers+transformers for Edge convert...\")\n            subprocess.run([\n\
+          \                uv_bin, \"pip\", \"install\", \"--python\", venv_python,\n\
+          \                \"diffusers @ git+https://github.com/huggingface/diffusers.git\"\
+          ,\n                \"transformers>=5.0\",\n            ], cwd=str(cf_dir),\
+          \ env=train_env, check=True)\n            # Verify Edge support is actually\
+          \ present\n            result = subprocess.run(\n                [venv_python,\
+          \ \"-c\",\n                 \"from diffusers import Cosmos3OmniTransformer;\
+          \ \"\n                 \"import inspect; \"\n                 \"p = inspect.signature(Cosmos3OmniTransformer.__init__).parameters;\
+          \ \"\n                 \"assert 'hidden_act' in p, f'missing hidden_act,\
+          \ have {list(p)}'; \"\n                 \"print('[finetune] diffusers Edge\
+          \ support verified')\"],\n                cwd=str(cf_dir), env=train_env,\
+          \ capture_output=True, text=True)\n            if result.returncode != 0:\n\
+          \                print(f\"[finetune] verify FAILED: {result.stderr}\")\n\
+          \                raise RuntimeError(\"diffusers upgrade did not provide\
+          \ Edge support\")\n            print(result.stdout.strip())\n          \
+          \  diffusers_marker.write_text(\"ok\")\n\n        print(f\"[finetune] Step\
+          \ 6b: converting to diffusers -> {scratch_diffusers}...\")\n        subprocess.run([\n\
+          \            venv_python, \"-m\",\n            \"cosmos_framework.scripts.convert_model_to_diffusers\"\
+          ,\n            \"--checkpoint-path\", str(scratch_export),\n           \
+          \ \"-o\",               str(scratch_diffusers),\n        ], cwd=str(cf_dir),\
+          \ env=train_env, check=True)\n        print(f\"[finetune] diffusers conversion\
+          \ produced {sum(1 for _ in scratch_diffusers.rglob('*'))} files\")\n\n \
+          \       # Free the intermediate export now that diffusers conversion is\
+          \ done\n        _cleanup.rmtree(scratch_export)\n        print(\"[finetune]\
+          \ freed intermediate export from scratch\")\n\n        # Copy Diffusers-format\
           \ output into the KFP artifact path\n        export_path = out_dir / \"\
           model\"\n        export_path.mkdir(parents=True, exist_ok=True)\n      \
           \  import shutil as _sc\n        for item in scratch_diffusers.iterdir():\n\
