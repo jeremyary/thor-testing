@@ -462,25 +462,30 @@ deploymentSpec:
           \ (safetensors -> Diffusers layout)\n        scratch_diffusers = scratch\
           \ / \"diffusers_model\"\n        if scratch_diffusers.exists():\n      \
           \      _cleanup.rmtree(scratch_diffusers)\n        print(f\"[finetune] Step\
-          \ 6b: converting to diffusers -> {scratch_diffusers}...\")\n        subprocess.run([\n\
-          \            uv_bin, \"run\", \"python\", \"-m\",\n            \"cosmos_framework.scripts.convert_model_to_diffusers\"\
-          ,\n            \"--checkpoint-path\", str(scratch_export),\n           \
-          \ \"-o\",               str(scratch_diffusers),\n        ], cwd=str(cf_dir),\
-          \ env=train_env, check=True)\n        print(f\"[finetune] diffusers conversion\
-          \ produced {sum(1 for _ in scratch_diffusers.rglob('*'))} files\")\n\n \
-          \       # Free the intermediate export now that diffusers conversion is\
-          \ done\n        _cleanup.rmtree(scratch_export)\n        print(\"[finetune]\
-          \ freed intermediate export from scratch\")\n\n        # Copy Diffusers-format\
-          \ output into the KFP artifact path\n        export_path = out_dir / \"\
-          model\"\n        export_path.mkdir(parents=True, exist_ok=True)\n      \
-          \  import shutil as _sc\n        for item in scratch_diffusers.iterdir():\n\
-          \            dest = export_path / item.name\n            if item.is_dir():\n\
-          \                _sc.copytree(item, dest)\n            else:\n         \
-          \       _sc.copy2(item, dest)\n            print(f\"[finetune]   copied\
-          \ {item.name} {'(dir)' if item.is_dir() else f'({item.stat().st_size} bytes)'}\"\
-          )\n        print(f\"[finetune] {sum(1 for _ in export_path.rglob('*'))}\
-          \ files in artifact\")\n\n        # Parse final loss -- prefer captured\
-          \ stdout, fall back to the\n        # launcher's log file under $OUTPUT_ROOT/logs/.\n\
+          \ 6b: converting to diffusers -> {scratch_diffusers}...\")\n        # Use\
+          \ the venv python directly instead of `uv run` -- uv run syncs\n       \
+          \ # from uv.lock first, which re-pins diffusers==0.39.0 and undoes our\n\
+          \        # Step 2b upgrade to diffusers main (needed for Edge support).\n\
+          \        venv_python = str(cf_dir / \".venv\" / \"bin\" / \"python\")\n\
+          \        subprocess.run([\n            venv_python, \"-m\",\n          \
+          \  \"cosmos_framework.scripts.convert_model_to_diffusers\",\n          \
+          \  \"--checkpoint-path\", str(scratch_export),\n            \"-o\",    \
+          \           str(scratch_diffusers),\n        ], cwd=str(cf_dir), env=train_env,\
+          \ check=True)\n        print(f\"[finetune] diffusers conversion produced\
+          \ {sum(1 for _ in scratch_diffusers.rglob('*'))} files\")\n\n        # Free\
+          \ the intermediate export now that diffusers conversion is done\n      \
+          \  _cleanup.rmtree(scratch_export)\n        print(\"[finetune] freed intermediate\
+          \ export from scratch\")\n\n        # Copy Diffusers-format output into\
+          \ the KFP artifact path\n        export_path = out_dir / \"model\"\n   \
+          \     export_path.mkdir(parents=True, exist_ok=True)\n        import shutil\
+          \ as _sc\n        for item in scratch_diffusers.iterdir():\n           \
+          \ dest = export_path / item.name\n            if item.is_dir():\n      \
+          \          _sc.copytree(item, dest)\n            else:\n               \
+          \ _sc.copy2(item, dest)\n            print(f\"[finetune]   copied {item.name}\
+          \ {'(dir)' if item.is_dir() else f'({item.stat().st_size} bytes)'}\")\n\
+          \        print(f\"[finetune] {sum(1 for _ in export_path.rglob('*'))} files\
+          \ in artifact\")\n\n        # Parse final loss -- prefer captured stdout,\
+          \ fall back to the\n        # launcher's log file under $OUTPUT_ROOT/logs/.\n\
           \        loss_sources = [train_stdout]\n        log_dir = scratch / \"outputs\"\
           \ / \"train\" / \"logs\"\n        loss_sources += [p.read_text() for p in\
           \ log_dir.glob(\"*.log\")] if log_dir.exists() else []\n        for text\

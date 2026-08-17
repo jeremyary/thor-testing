@@ -380,8 +380,12 @@ def finetune_cosmos3(
         if scratch_diffusers.exists():
             _cleanup.rmtree(scratch_diffusers)
         print(f"[finetune] Step 6b: converting to diffusers -> {scratch_diffusers}...")
+        # Use the venv python directly instead of `uv run` -- uv run syncs
+        # from uv.lock first, which re-pins diffusers==0.39.0 and undoes our
+        # Step 2b upgrade to diffusers main (needed for Edge support).
+        venv_python = str(cf_dir / ".venv" / "bin" / "python")
         subprocess.run([
-            uv_bin, "run", "python", "-m",
+            venv_python, "-m",
             "cosmos_framework.scripts.convert_model_to_diffusers",
             "--checkpoint-path", str(scratch_export),
             "-o",               str(scratch_diffusers),
