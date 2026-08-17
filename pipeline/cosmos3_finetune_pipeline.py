@@ -303,7 +303,20 @@ def finetune_cosmos3(
         print(f"[finetune] training exit code {result.returncode} -- checking checkpoint...")
 
     # -----------------------------------------------------------------------
-    # Step 6: Export DCP checkpoint to HuggingFace safetensors
+    # Step 6: Export DCP checkpoint -> Diffusers pipeline directory
+    #
+    # NVIDIA's documented two-step conversion:
+    #   6a. export_model: DCP -> safetensors (cosmos-framework internal format)
+    #   6b. convert_model_to_diffusers: safetensors -> Diffusers pipeline layout
+    #       (transformer/, vae/, scheduler/, model_index.json, etc.)
+    #
+    # vllm-omni serves via Cosmos3OmniDiffusersPipeline, which auto-resolves
+    # from model_index.json. Without Step 6b, the export has flat safetensors
+    # with cosmos-framework tensor names that vllm-omni cannot load.
+    #
+    # Both steps write to scratch (reliable local FS) first, then copy into
+    # the KFP artifact path — writing multi-GB safetensors directly to the
+    # S3 FUSE mount loses files during KFP's artifact upload.
     # -----------------------------------------------------------------------
     run_subdir = scratch / "outputs" / "train" / "cosmos3" / "sft" / "vision_sft_edge"
     ckpt_ptr   = run_subdir / "checkpoints" / "latest_checkpoint.txt"
@@ -313,15 +326,48 @@ def finetune_cosmos3(
         ckpt_iter   = ckpt_ptr.read_text().strip()
         ckpt_path   = run_subdir / "checkpoints" / ckpt_iter
         config_f    = run_subdir / "config.yaml"
-        export_path = out_dir / "model"
-        print(f"[finetune] exporting {ckpt_iter} -> {export_path}...")
+
+        # Step 6a: export_model (DCP -> safetensors)
+        scratch_export = scratch / "exported_model"
+        if scratch_export.exists():
+            import shutil as _sx
+            _sx.rmtree(scratch_export)
+        print(f"[finetune] Step 6a: exporting {ckpt_iter} -> {scratch_export}...")
         subprocess.run([
             uv_bin, "run", "python", "-m",
             "cosmos_framework.scripts.export_model",
             "--checkpoint-path", str(ckpt_path),
             "--config-file",    str(config_f),
-            "-o",               str(export_path),
+            "-o",               str(scratch_export),
         ], cwd=str(cf_dir), env=train_env, check=True)
+        print(f"[finetune] export_model produced {sum(1 for _ in scratch_export.rglob('*'))} files")
+
+        # Step 6b: convert_model_to_diffusers (safetensors -> Diffusers layout)
+        scratch_diffusers = scratch / "diffusers_model"
+        if scratch_diffusers.exists():
+            import shutil as _sd
+            _sd.rmtree(scratch_diffusers)
+        print(f"[finetune] Step 6b: converting to diffusers -> {scratch_diffusers}...")
+        subprocess.run([
+            uv_bin, "run", "python", "-m",
+            "cosmos_framework.scripts.convert_model_to_diffusers",
+            "--checkpoint-path", str(scratch_export),
+            "-o",               str(scratch_diffusers),
+        ], cwd=str(cf_dir), env=train_env, check=True)
+        print(f"[finetune] diffusers conversion produced {sum(1 for _ in scratch_diffusers.rglob('*'))} files")
+
+        # Copy Diffusers-format output into the KFP artifact path
+        export_path = out_dir / "model"
+        export_path.mkdir(parents=True, exist_ok=True)
+        import shutil as _sc
+        for item in scratch_diffusers.iterdir():
+            dest = export_path / item.name
+            if item.is_dir():
+                _sc.copytree(item, dest)
+            else:
+                _sc.copy2(item, dest)
+            print(f"[finetune]   copied {item.name} {'(dir)' if item.is_dir() else f'({item.stat().st_size} bytes)'}")
+        print(f"[finetune] {sum(1 for _ in export_path.rglob('*'))} files in artifact")
 
         # Parse final loss -- prefer captured stdout, fall back to the
         # launcher's log file under $OUTPUT_ROOT/logs/.

@@ -408,24 +408,57 @@ deploymentSpec:
           \ pod logs\n    if result.returncode != 0:\n        print(f\"[finetune]\
           \ training exit code {result.returncode} -- checking checkpoint...\")\n\n\
           \    # -----------------------------------------------------------------------\n\
-          \    # Step 6: Export DCP checkpoint to HuggingFace safetensors\n    # -----------------------------------------------------------------------\n\
+          \    # Step 6: Export DCP checkpoint -> Diffusers pipeline directory\n \
+          \   #\n    # NVIDIA's documented two-step conversion:\n    #   6a. export_model:\
+          \ DCP -> safetensors (cosmos-framework internal format)\n    #   6b. convert_model_to_diffusers:\
+          \ safetensors -> Diffusers pipeline layout\n    #       (transformer/, vae/,\
+          \ scheduler/, model_index.json, etc.)\n    #\n    # vllm-omni serves via\
+          \ Cosmos3OmniDiffusersPipeline, which auto-resolves\n    # from model_index.json.\
+          \ Without Step 6b, the export has flat safetensors\n    # with cosmos-framework\
+          \ tensor names that vllm-omni cannot load.\n    #\n    # Both steps write\
+          \ to scratch (reliable local FS) first, then copy into\n    # the KFP artifact\
+          \ path \u2014 writing multi-GB safetensors directly to the\n    # S3 FUSE\
+          \ mount loses files during KFP's artifact upload.\n    # -----------------------------------------------------------------------\n\
           \    run_subdir = scratch / \"outputs\" / \"train\" / \"cosmos3\" / \"sft\"\
           \ / \"vision_sft_edge\"\n    ckpt_ptr   = run_subdir / \"checkpoints\" /\
           \ \"latest_checkpoint.txt\"\n    final_loss = 0.0\n\n    if ckpt_ptr.exists():\n\
           \        ckpt_iter   = ckpt_ptr.read_text().strip()\n        ckpt_path \
           \  = run_subdir / \"checkpoints\" / ckpt_iter\n        config_f    = run_subdir\
-          \ / \"config.yaml\"\n        export_path = out_dir / \"model\"\n       \
-          \ print(f\"[finetune] exporting {ckpt_iter} -> {export_path}...\")\n   \
-          \     subprocess.run([\n            uv_bin, \"run\", \"python\", \"-m\"\
-          ,\n            \"cosmos_framework.scripts.export_model\",\n            \"\
-          --checkpoint-path\", str(ckpt_path),\n            \"--config-file\",   \
-          \ str(config_f),\n            \"-o\",               str(export_path),\n\
-          \        ], cwd=str(cf_dir), env=train_env, check=True)\n\n        # Parse\
-          \ final loss -- prefer captured stdout, fall back to the\n        # launcher's\
-          \ log file under $OUTPUT_ROOT/logs/.\n        loss_sources = [train_stdout]\n\
-          \        log_dir = scratch / \"outputs\" / \"train\" / \"logs\"\n      \
-          \  loss_sources += [p.read_text() for p in log_dir.glob(\"*.log\")] if log_dir.exists()\
-          \ else []\n        for text in loss_sources:\n            for line in reversed(text.splitlines()):\n\
+          \ / \"config.yaml\"\n\n        # Step 6a: export_model (DCP -> safetensors)\n\
+          \        scratch_export = scratch / \"exported_model\"\n        if scratch_export.exists():\n\
+          \            import shutil as _sx\n            _sx.rmtree(scratch_export)\n\
+          \        print(f\"[finetune] Step 6a: exporting {ckpt_iter} -> {scratch_export}...\"\
+          )\n        subprocess.run([\n            uv_bin, \"run\", \"python\", \"\
+          -m\",\n            \"cosmos_framework.scripts.export_model\",\n        \
+          \    \"--checkpoint-path\", str(ckpt_path),\n            \"--config-file\"\
+          ,    str(config_f),\n            \"-o\",               str(scratch_export),\n\
+          \        ], cwd=str(cf_dir), env=train_env, check=True)\n        print(f\"\
+          [finetune] export_model produced {sum(1 for _ in scratch_export.rglob('*'))}\
+          \ files\")\n\n        # Step 6b: convert_model_to_diffusers (safetensors\
+          \ -> Diffusers layout)\n        scratch_diffusers = scratch / \"diffusers_model\"\
+          \n        if scratch_diffusers.exists():\n            import shutil as _sd\n\
+          \            _sd.rmtree(scratch_diffusers)\n        print(f\"[finetune]\
+          \ Step 6b: converting to diffusers -> {scratch_diffusers}...\")\n      \
+          \  subprocess.run([\n            uv_bin, \"run\", \"python\", \"-m\",\n\
+          \            \"cosmos_framework.scripts.convert_model_to_diffusers\",\n\
+          \            \"--checkpoint-path\", str(scratch_export),\n            \"\
+          -o\",               str(scratch_diffusers),\n        ], cwd=str(cf_dir),\
+          \ env=train_env, check=True)\n        print(f\"[finetune] diffusers conversion\
+          \ produced {sum(1 for _ in scratch_diffusers.rglob('*'))} files\")\n\n \
+          \       # Copy Diffusers-format output into the KFP artifact path\n    \
+          \    export_path = out_dir / \"model\"\n        export_path.mkdir(parents=True,\
+          \ exist_ok=True)\n        import shutil as _sc\n        for item in scratch_diffusers.iterdir():\n\
+          \            dest = export_path / item.name\n            if item.is_dir():\n\
+          \                _sc.copytree(item, dest)\n            else:\n         \
+          \       _sc.copy2(item, dest)\n            print(f\"[finetune]   copied\
+          \ {item.name} {'(dir)' if item.is_dir() else f'({item.stat().st_size} bytes)'}\"\
+          )\n        print(f\"[finetune] {sum(1 for _ in export_path.rglob('*'))}\
+          \ files in artifact\")\n\n        # Parse final loss -- prefer captured\
+          \ stdout, fall back to the\n        # launcher's log file under $OUTPUT_ROOT/logs/.\n\
+          \        loss_sources = [train_stdout]\n        log_dir = scratch / \"outputs\"\
+          \ / \"train\" / \"logs\"\n        loss_sources += [p.read_text() for p in\
+          \ log_dir.glob(\"*.log\")] if log_dir.exists() else []\n        for text\
+          \ in loss_sources:\n            for line in reversed(text.splitlines()):\n\
           \                m = re.search(r\"Loss:\\s*([\\d.]+)\", line)\n        \
           \        if m:\n                    final_loss = float(m.group(1))\n   \
           \                 break\n            if final_loss > 0:\n              \
