@@ -586,14 +586,32 @@ def package_modelcar(
     image_ref = f"{registry}/{image_name}:{model_version}"
     print(f"[package] building modelcar -> {image_ref}")
 
-    # Create a tar of the checkpoint directory to append as a layer
+    # Create a tar with the checkpoint at /models/huggingface/ inside the image.
+    # The green deployment's initContainer does: cp -a /models/huggingface/. /hf-cache/
+    # so the tar must place the exported safetensors at that exact path.
+    import shutil as _shutil2
+    staging = pathlib.Path("/tmp/modelcar-staging")
+    model_dest = staging / "models" / "huggingface"
+    if staging.exists():
+        _shutil2.rmtree(staging)
+    model_dest.mkdir(parents=True)
+    # Copy exported model into the expected path
+    model_src = checkpoint_dir / "model" if (checkpoint_dir / "model").exists() else checkpoint_dir
+    for item in model_src.iterdir():
+        dest = model_dest / item.name
+        if item.is_dir():
+            _shutil2.copytree(item, dest)
+        else:
+            _shutil2.copy2(item, dest)
+    print(f"[package] staged {sum(1 for _ in model_dest.rglob('*'))} files at /models/huggingface/")
+
     with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as tmp:
         layer_tar = tmp.name
 
     subprocess.run([
         "tar", "-cf", layer_tar,
-        "-C", str(checkpoint_dir.parent),
-        checkpoint_dir.name,
+        "-C", str(staging),
+        "models",
     ], check=True)
 
     # crane append: base=ubi9-micro (arm64 -- Thor is Jetson aarch64).
