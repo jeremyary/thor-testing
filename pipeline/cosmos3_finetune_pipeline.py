@@ -242,13 +242,17 @@ def finetune_cosmos3(
     # produce a broken checkpoint without them. Training itself uses
     # cosmos-framework's own model code (not diffusers), so this upgrade
     # only affects the post-training conversion step.
-    diffusers_marker = cf_dir / ".venv" / ".diffusers-upgraded"
+    #
+    # Must use `uv add --upgrade` to override the lockfile pin. Plain
+    # `uv pip install` into a uv-managed venv gets ignored/overridden by
+    # the lockfile on the next `uv run`.
+    diffusers_marker = cf_dir / ".venv" / ".diffusers-edge-ok"
     if not diffusers_marker.exists():
         print("[finetune] upgrading diffusers to main (Edge transformer support)...")
         subprocess.run([
-            uv_bin, "pip", "install",
+            uv_bin, "add", "--upgrade",
             "diffusers @ git+https://github.com/huggingface/diffusers.git",
-        ], cwd=str(cf_dir), env=env, check=True, capture_output=True)
+        ], cwd=str(cf_dir), env=env, check=True)
         diffusers_marker.write_text("upgraded")
         print("[finetune] diffusers upgraded")
 
@@ -380,12 +384,8 @@ def finetune_cosmos3(
         if scratch_diffusers.exists():
             _cleanup.rmtree(scratch_diffusers)
         print(f"[finetune] Step 6b: converting to diffusers -> {scratch_diffusers}...")
-        # Use the venv python directly instead of `uv run` -- uv run syncs
-        # from uv.lock first, which re-pins diffusers==0.39.0 and undoes our
-        # Step 2b upgrade to diffusers main (needed for Edge support).
-        venv_python = str(cf_dir / ".venv" / "bin" / "python")
         subprocess.run([
-            venv_python, "-m",
+            uv_bin, "run", "python", "-m",
             "cosmos_framework.scripts.convert_model_to_diffusers",
             "--checkpoint-path", str(scratch_export),
             "-o",               str(scratch_diffusers),
