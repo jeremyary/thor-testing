@@ -328,10 +328,20 @@ def finetune_cosmos3(
         config_f    = run_subdir / "config.yaml"
 
         # Step 6a: export_model (DCP -> safetensors)
+        # Free scratch space first: the DCP checkpoint (~8GB) and all training
+        # checkpoints except the one we're exporting are no longer needed.
+        # The 60Gi scratch PVC holds venv (6GB) + HF model (12GB) + DCP (8GB)
+        # + training outputs (8GB) = ~34GB used. The export + diffusers
+        # conversion need ~16GB more, so reclaim the DCP to stay within budget.
+        import shutil as _cleanup
+        dcp_dir = cf_dir / "examples" / "checkpoints" / "Cosmos3-Edge"
+        if dcp_dir.exists():
+            _cleanup.rmtree(dcp_dir)
+            print("[finetune] freed DCP checkpoint from scratch")
+
         scratch_export = scratch / "exported_model"
         if scratch_export.exists():
-            import shutil as _sx
-            _sx.rmtree(scratch_export)
+            _cleanup.rmtree(scratch_export)
         print(f"[finetune] Step 6a: exporting {ckpt_iter} -> {scratch_export}...")
         subprocess.run([
             uv_bin, "run", "python", "-m",
@@ -342,11 +352,16 @@ def finetune_cosmos3(
         ], cwd=str(cf_dir), env=train_env, check=True)
         print(f"[finetune] export_model produced {sum(1 for _ in scratch_export.rglob('*'))} files")
 
+        # Free the training checkpoints now that export is done
+        ckpts_dir = run_subdir / "checkpoints"
+        if ckpts_dir.exists():
+            _cleanup.rmtree(ckpts_dir)
+            print("[finetune] freed training checkpoints from scratch")
+
         # Step 6b: convert_model_to_diffusers (safetensors -> Diffusers layout)
         scratch_diffusers = scratch / "diffusers_model"
         if scratch_diffusers.exists():
-            import shutil as _sd
-            _sd.rmtree(scratch_diffusers)
+            _cleanup.rmtree(scratch_diffusers)
         print(f"[finetune] Step 6b: converting to diffusers -> {scratch_diffusers}...")
         subprocess.run([
             uv_bin, "run", "python", "-m",
@@ -355,6 +370,10 @@ def finetune_cosmos3(
             "-o",               str(scratch_diffusers),
         ], cwd=str(cf_dir), env=train_env, check=True)
         print(f"[finetune] diffusers conversion produced {sum(1 for _ in scratch_diffusers.rglob('*'))} files")
+
+        # Free the intermediate export now that diffusers conversion is done
+        _cleanup.rmtree(scratch_export)
+        print("[finetune] freed intermediate export from scratch")
 
         # Copy Diffusers-format output into the KFP artifact path
         export_path = out_dir / "model"

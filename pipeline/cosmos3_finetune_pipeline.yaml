@@ -425,8 +425,16 @@ deploymentSpec:
           \        ckpt_iter   = ckpt_ptr.read_text().strip()\n        ckpt_path \
           \  = run_subdir / \"checkpoints\" / ckpt_iter\n        config_f    = run_subdir\
           \ / \"config.yaml\"\n\n        # Step 6a: export_model (DCP -> safetensors)\n\
-          \        scratch_export = scratch / \"exported_model\"\n        if scratch_export.exists():\n\
-          \            import shutil as _sx\n            _sx.rmtree(scratch_export)\n\
+          \        # Free scratch space first: the DCP checkpoint (~8GB) and all training\n\
+          \        # checkpoints except the one we're exporting are no longer needed.\n\
+          \        # The 60Gi scratch PVC holds venv (6GB) + HF model (12GB) + DCP\
+          \ (8GB)\n        # + training outputs (8GB) = ~34GB used. The export + diffusers\n\
+          \        # conversion need ~16GB more, so reclaim the DCP to stay within\
+          \ budget.\n        import shutil as _cleanup\n        dcp_dir = cf_dir /\
+          \ \"examples\" / \"checkpoints\" / \"Cosmos3-Edge\"\n        if dcp_dir.exists():\n\
+          \            _cleanup.rmtree(dcp_dir)\n            print(\"[finetune] freed\
+          \ DCP checkpoint from scratch\")\n\n        scratch_export = scratch / \"\
+          exported_model\"\n        if scratch_export.exists():\n            _cleanup.rmtree(scratch_export)\n\
           \        print(f\"[finetune] Step 6a: exporting {ckpt_iter} -> {scratch_export}...\"\
           )\n        subprocess.run([\n            uv_bin, \"run\", \"python\", \"\
           -m\",\n            \"cosmos_framework.scripts.export_model\",\n        \
@@ -434,20 +442,25 @@ deploymentSpec:
           ,    str(config_f),\n            \"-o\",               str(scratch_export),\n\
           \        ], cwd=str(cf_dir), env=train_env, check=True)\n        print(f\"\
           [finetune] export_model produced {sum(1 for _ in scratch_export.rglob('*'))}\
-          \ files\")\n\n        # Step 6b: convert_model_to_diffusers (safetensors\
-          \ -> Diffusers layout)\n        scratch_diffusers = scratch / \"diffusers_model\"\
-          \n        if scratch_diffusers.exists():\n            import shutil as _sd\n\
-          \            _sd.rmtree(scratch_diffusers)\n        print(f\"[finetune]\
-          \ Step 6b: converting to diffusers -> {scratch_diffusers}...\")\n      \
-          \  subprocess.run([\n            uv_bin, \"run\", \"python\", \"-m\",\n\
-          \            \"cosmos_framework.scripts.convert_model_to_diffusers\",\n\
-          \            \"--checkpoint-path\", str(scratch_export),\n            \"\
-          -o\",               str(scratch_diffusers),\n        ], cwd=str(cf_dir),\
+          \ files\")\n\n        # Free the training checkpoints now that export is\
+          \ done\n        ckpts_dir = run_subdir / \"checkpoints\"\n        if ckpts_dir.exists():\n\
+          \            _cleanup.rmtree(ckpts_dir)\n            print(\"[finetune]\
+          \ freed training checkpoints from scratch\")\n\n        # Step 6b: convert_model_to_diffusers\
+          \ (safetensors -> Diffusers layout)\n        scratch_diffusers = scratch\
+          \ / \"diffusers_model\"\n        if scratch_diffusers.exists():\n      \
+          \      _cleanup.rmtree(scratch_diffusers)\n        print(f\"[finetune] Step\
+          \ 6b: converting to diffusers -> {scratch_diffusers}...\")\n        subprocess.run([\n\
+          \            uv_bin, \"run\", \"python\", \"-m\",\n            \"cosmos_framework.scripts.convert_model_to_diffusers\"\
+          ,\n            \"--checkpoint-path\", str(scratch_export),\n           \
+          \ \"-o\",               str(scratch_diffusers),\n        ], cwd=str(cf_dir),\
           \ env=train_env, check=True)\n        print(f\"[finetune] diffusers conversion\
           \ produced {sum(1 for _ in scratch_diffusers.rglob('*'))} files\")\n\n \
-          \       # Copy Diffusers-format output into the KFP artifact path\n    \
-          \    export_path = out_dir / \"model\"\n        export_path.mkdir(parents=True,\
-          \ exist_ok=True)\n        import shutil as _sc\n        for item in scratch_diffusers.iterdir():\n\
+          \       # Free the intermediate export now that diffusers conversion is\
+          \ done\n        _cleanup.rmtree(scratch_export)\n        print(\"[finetune]\
+          \ freed intermediate export from scratch\")\n\n        # Copy Diffusers-format\
+          \ output into the KFP artifact path\n        export_path = out_dir / \"\
+          model\"\n        export_path.mkdir(parents=True, exist_ok=True)\n      \
+          \  import shutil as _sc\n        for item in scratch_diffusers.iterdir():\n\
           \            dest = export_path / item.name\n            if item.is_dir():\n\
           \                _sc.copytree(item, dest)\n            else:\n         \
           \       _sc.copy2(item, dest)\n            print(f\"[finetune]   copied\
