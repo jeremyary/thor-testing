@@ -5,7 +5,7 @@ metadata:
   name: cosmos3-edge
   namespace: vllm
 spec:
-  replicas: 1
+  replicas: 0
   # Recreate, not RollingUpdate: Thor has exactly one GPU, so a surge pod
   # can never schedule alongside the outgoing one (Insufficient nvidia.com/gpu).
   strategy:
