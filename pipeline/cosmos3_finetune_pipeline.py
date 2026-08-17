@@ -48,6 +48,7 @@ from kfp.kubernetes import (
     add_toleration,
     empty_dir_mount,
     mount_pvc,
+    use_secret_as_env,
     use_secret_as_volume,
 )
 
@@ -1084,6 +1085,12 @@ def cosmos3_finetune_pipeline(
     # different outputs depending on scratch PVC state, and a cached "no
     # checkpoint" result from a failed run poisons subsequent attempts.
     finetune_task.set_caching_options(False)
+    # HF_TOKEN for authenticated Hub downloads. The diffusers convert step
+    # (Step 6b) fetches the Wan2.2 Diffusers-format VAE from the Hub;
+    # unauthenticated requests hit rate limits / transient connection errors,
+    # after which diffusers falls back to a non-existent .bin and hard-fails.
+    use_secret_as_env(finetune_task, secret_name="hf-credentials",
+                      secret_key_to_env={"HF_TOKEN": "HF_TOKEN"})
     # GPU resource request -- Kueue queues this until L40S node is available (scale-from-zero)
     finetune_task.set_accelerator_type("nvidia.com/gpu").set_accelerator_limit(1)
     # Kueue queue label (matches the robotics-train LocalQueue in vla-training namespace)

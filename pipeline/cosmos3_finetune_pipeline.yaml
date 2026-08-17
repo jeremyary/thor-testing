@@ -1224,6 +1224,15 @@ platforms:
             pvcNameParameter:
               runtimeValue:
                 constant: finetune-scratch
+          secretAsEnv:
+          - keyToEnv:
+            - envVar: HF_TOKEN
+              secretKey: HF_TOKEN
+            optional: false
+            secretName: hf-credentials
+            secretNameParameter:
+              runtimeValue:
+                constant: hf-credentials
           tolerations:
           - effect: NoSchedule
             key: nvidia.com/gpu
