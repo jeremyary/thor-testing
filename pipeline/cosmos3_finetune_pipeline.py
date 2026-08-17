@@ -586,24 +586,38 @@ def package_modelcar(
     image_ref = f"{registry}/{image_name}:{model_version}"
     print(f"[package] building modelcar -> {image_ref}")
 
-    # Create a tar with the checkpoint at /models/huggingface/ inside the image.
-    # The green deployment's initContainer does: cp -a /models/huggingface/. /hf-cache/
-    # so the tar must place the exported safetensors at that exact path.
-    import shutil as _shutil2
+    # Stage the checkpoint in the HuggingFace cache directory layout.
+    # The green deployment's entrypoint does:
+    #   snapshot_download('nvidia/Cosmos3-Edge', local_files_only=True)
+    # which expects the HF cache hierarchy:
+    #   hub/models--nvidia--Cosmos3-Edge/snapshots/<hash>/<files>
+    # The initContainer copies /models/huggingface/. -> /hf-cache/ which is
+    # mounted at /root/.cache/huggingface in the main container.
+    import shutil as _shutil2, hashlib as _hashlib
     staging = pathlib.Path("/tmp/modelcar-staging")
-    model_dest = staging / "models" / "huggingface"
     if staging.exists():
         _shutil2.rmtree(staging)
-    model_dest.mkdir(parents=True)
-    # Copy exported model into the expected path
+
+    # Create the HF cache structure with a synthetic snapshot hash
     model_src = checkpoint_dir / "model" if (checkpoint_dir / "model").exists() else checkpoint_dir
+    snap_hash = _hashlib.sha256(model_version.encode()).hexdigest()[:40]
+    snap_dir  = staging / "models" / "huggingface" / "hub" / "models--nvidia--Cosmos3-Edge" / "snapshots" / snap_hash
+    snap_dir.mkdir(parents=True)
+
+    # Copy exported safetensors into the snapshot
     for item in model_src.iterdir():
-        dest = model_dest / item.name
+        dest = snap_dir / item.name
         if item.is_dir():
             _shutil2.copytree(item, dest)
         else:
             _shutil2.copy2(item, dest)
-    print(f"[package] staged {sum(1 for _ in model_dest.rglob('*'))} files at /models/huggingface/")
+
+    # Write the refs/main pointer so snapshot_download finds it
+    refs_dir = snap_dir.parent.parent / "refs"
+    refs_dir.mkdir(parents=True, exist_ok=True)
+    (refs_dir / "main").write_text(snap_hash)
+
+    print(f"[package] staged {sum(1 for _ in snap_dir.rglob('*'))} files in HF cache layout (snap={snap_hash[:12]})")
 
     with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as tmp:
         layer_tar = tmp.name

@@ -11,7 +11,7 @@ spec:
   # newly-promoted model checkpoint without a reboot. See deployment-green.yaml.
   selector:
     app: cosmos3-edge
-    color: blue
+    color: green
   ports:
     - port: 8000
       targetPort: 8000
