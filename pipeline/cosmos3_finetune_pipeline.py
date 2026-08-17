@@ -381,24 +381,29 @@ def finetune_cosmos3(
             _cleanup.rmtree(scratch_diffusers)
         # Step 6b requires diffusers with Edge transformer support (hidden_act,
         # qk_norm_for_text on Cosmos3OmniTransformer). PyPI diffusers 0.39.0
-        # predates this; diffusers main has it but needs huggingface-hub>=1.23
-        # and transformers>=5.0. These conflict with cosmos-framework's lockfile
-        # (transformers<5, hub<1.0), so we install them AFTER training is done,
-        # directly into the venv via pip (bypassing uv's resolver). The convert
-        # step uses the venv python directly (not uv run) to avoid the lockfile
-        # re-syncing and reverting the upgrade.
+        # predates this; diffusers main has it but needs huggingface-hub>=1.23.
+        # This conflicts with transformers 4.x (hub<1.0) which cosmos-framework
+        # requires (transformers 5.x breaks cosmos-framework internals).
+        #
+        # Resolution: install diffusers main (which pulls hub>=1.23), keep
+        # transformers 4.x, and set TRANSFORMERS_NO_DEPENDENCY_CHECK=1 to
+        # suppress transformers' runtime hub version check. The convert step
+        # only uses basic transformers APIs (AutoConfig, AutoTokenizer) that
+        # work fine with hub v1.x despite the version pin.
         venv_python = str(cf_dir / ".venv" / "bin" / "python")
         diffusers_marker = cf_dir / ".venv" / ".diffusers-edge-ok"
         if not diffusers_marker.exists():
-            print("[finetune] upgrading diffusers+transformers for Edge convert...")
+            print("[finetune] upgrading diffusers for Edge convert...")
             subprocess.run([
                 uv_bin, "pip", "install", "--python", venv_python,
                 "diffusers @ git+https://github.com/huggingface/diffusers.git",
-                "transformers>=5.0",
             ], cwd=str(cf_dir), env=train_env, check=True)
-            # Verify Edge support is actually present
+            # Verify Edge support (bypass transformers hub version check)
             result = subprocess.run(
                 [venv_python, "-c",
+                 "import transformers.utils.versions as v; "
+                 "v.require_version = lambda *a, **k: None; "
+                 "v.require_version_core = lambda *a, **k: None; "
                  "from diffusers import Cosmos3OmniTransformer; "
                  "import inspect; "
                  "p = inspect.signature(Cosmos3OmniTransformer.__init__).parameters; "
@@ -412,9 +417,27 @@ def finetune_cosmos3(
             diffusers_marker.write_text("ok")
 
         print(f"[finetune] Step 6b: converting to diffusers -> {scratch_diffusers}...")
+        # Wrap the convert call to bypass transformers' hub version check.
+        # transformers 4.57.x hard-errors on huggingface-hub>=1.0, but
+        # diffusers main installed hub v1.x. The actual APIs used by the
+        # convert script (AutoConfig, AutoTokenizer) work fine with hub v1.x.
+        wrapper = scratch / "_convert_wrapper.py"
+        wrapper.write_text(
+            "import transformers.dependency_versions_check as _dvc\n"
+            "# Suppress the hub version check that was already run at install time\n"
+            "import transformers.utils.versions as _v\n"
+            "_orig = _v.require_version\n"
+            "def _patched(req, hint=None):\n"
+            "    if 'huggingface' in req: return\n"
+            "    return _orig(req, hint)\n"
+            "_v.require_version = _patched\n"
+            "_v.require_version_core = lambda req: _patched(req)\n"
+            "# Now run the actual converter\n"
+            "from cosmos_framework.scripts.convert_model_to_diffusers import main\n"
+            "main()\n"
+        )
         subprocess.run([
-            venv_python, "-m",
-            "cosmos_framework.scripts.convert_model_to_diffusers",
+            venv_python, str(wrapper),
             "--checkpoint-path", str(scratch_export),
             "-o",               str(scratch_diffusers),
         ], cwd=str(cf_dir), env=train_env, check=True)
