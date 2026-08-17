@@ -499,14 +499,35 @@ deploymentSpec:
           , venv_python, \"--no-deps\",\n            \"huggingface-hub>=1.23,<2.0\"\
           ,\n            \"diffusers @ git+https://github.com/huggingface/diffusers.git\"\
           ,\n        ], cwd=str(cf_dir), env=train_env, check=True)\n\n        # Wrapper\
-          \ that neutralizes transformers' hub version check (a working\n        #\
-          \ stub, not an empty module -- transformers imports dep_version_check\n\
-          \        # from it) before importing the converter, then runs it.\n    \
-          \    wrapper = scratch / \"_convert_wrapper.py\"\n        wrapper.write_text(\n\
-          \            \"import types, sys\\n\"\n            \"_stub = types.ModuleType('transformers.dependency_versions_check')\\\
-          n\"\n            \"_stub.dep_version_check = lambda *a, **k: None\\n\"\n\
-          \            \"sys.modules['transformers.dependency_versions_check'] = _stub\\\
-          n\"\n            \"from cosmos_framework.scripts.convert_model_to_diffusers\
+          \ that reconciles transformers 4.57 with huggingface-hub 1.x.\n        #\
+          \ Two incompatibilities, both patched before importing the converter:\n\
+          \        #\n        # 1. Version check: transformers.dependency_versions_check\
+          \ hard-errors\n        #    on hub>=1.0 at import. Replace it with a working\
+          \ stub (providing\n        #    the dep_version_check no-op that transformers'\
+          \ own modules import).\n        #\n        # 2. list_repo_templates: transformers\
+          \ 4.57 catches requests.HTTPError\n        #    around its optional additional_chat_templates/\
+          \ lookup, but hub 1.x\n        #    raises huggingface_hub.errors.EntryNotFoundError\
+          \ (a different\n        #    HTTPError base), so a missing template dir\
+          \ (a 404, which is normal\n        #    -- most repos have no additional_chat_templates/)\
+          \ propagates as\n        #    fatal. Wrap it to treat EntryNotFoundError\
+          \ as \"no templates\".\n        wrapper = scratch / \"_convert_wrapper.py\"\
+          \n        wrapper.write_text(\n            \"import types, sys\\n\"\n  \
+          \          \"# (1) neutralize the hub version check\\n\"\n            \"\
+          _stub = types.ModuleType('transformers.dependency_versions_check')\\n\"\n\
+          \            \"_stub.dep_version_check = lambda *a, **k: None\\n\"\n   \
+          \         \"sys.modules['transformers.dependency_versions_check'] = _stub\\\
+          n\"\n            \"# (2) make list_repo_templates tolerate hub 1.x's 404\
+          \ error class\\n\"\n            \"import transformers.utils.hub as _tuh\\\
+          n\"\n            \"from huggingface_hub.errors import EntryNotFoundError\
+          \ as _ENFE\\n\"\n            \"_orig_lrt = _tuh.list_repo_templates\\n\"\
+          \n            \"def _safe_lrt(*a, **k):\\n\"\n            \"    try:\\n\"\
+          \n            \"        return _orig_lrt(*a, **k)\\n\"\n            \" \
+          \   except _ENFE:\\n\"\n            \"        return []\\n\"\n         \
+          \   \"_tuh.list_repo_templates = _safe_lrt\\n\"\n            \"# tokenization_utils_base\
+          \ imported the name directly; patch there too\\n\"\n            \"import\
+          \ transformers.tokenization_utils_base as _tub\\n\"\n            \"if hasattr(_tub,\
+          \ 'list_repo_templates'):\\n\"\n            \"    _tub.list_repo_templates\
+          \ = _safe_lrt\\n\"\n            \"from cosmos_framework.scripts.convert_model_to_diffusers\
           \ import main\\n\"\n            \"main()\\n\"\n        )\n\n        # Verify\
           \ the full import chain + Edge support before the real convert.\n      \
           \  result = subprocess.run(\n            [venv_python, \"-c\",\n       \

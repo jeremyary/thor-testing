@@ -419,15 +419,40 @@ def finetune_cosmos3(
             "diffusers @ git+https://github.com/huggingface/diffusers.git",
         ], cwd=str(cf_dir), env=train_env, check=True)
 
-        # Wrapper that neutralizes transformers' hub version check (a working
-        # stub, not an empty module -- transformers imports dep_version_check
-        # from it) before importing the converter, then runs it.
+        # Wrapper that reconciles transformers 4.57 with huggingface-hub 1.x.
+        # Two incompatibilities, both patched before importing the converter:
+        #
+        # 1. Version check: transformers.dependency_versions_check hard-errors
+        #    on hub>=1.0 at import. Replace it with a working stub (providing
+        #    the dep_version_check no-op that transformers' own modules import).
+        #
+        # 2. list_repo_templates: transformers 4.57 catches requests.HTTPError
+        #    around its optional additional_chat_templates/ lookup, but hub 1.x
+        #    raises huggingface_hub.errors.EntryNotFoundError (a different
+        #    HTTPError base), so a missing template dir (a 404, which is normal
+        #    -- most repos have no additional_chat_templates/) propagates as
+        #    fatal. Wrap it to treat EntryNotFoundError as "no templates".
         wrapper = scratch / "_convert_wrapper.py"
         wrapper.write_text(
             "import types, sys\n"
+            "# (1) neutralize the hub version check\n"
             "_stub = types.ModuleType('transformers.dependency_versions_check')\n"
             "_stub.dep_version_check = lambda *a, **k: None\n"
             "sys.modules['transformers.dependency_versions_check'] = _stub\n"
+            "# (2) make list_repo_templates tolerate hub 1.x's 404 error class\n"
+            "import transformers.utils.hub as _tuh\n"
+            "from huggingface_hub.errors import EntryNotFoundError as _ENFE\n"
+            "_orig_lrt = _tuh.list_repo_templates\n"
+            "def _safe_lrt(*a, **k):\n"
+            "    try:\n"
+            "        return _orig_lrt(*a, **k)\n"
+            "    except _ENFE:\n"
+            "        return []\n"
+            "_tuh.list_repo_templates = _safe_lrt\n"
+            "# tokenization_utils_base imported the name directly; patch there too\n"
+            "import transformers.tokenization_utils_base as _tub\n"
+            "if hasattr(_tub, 'list_repo_templates'):\n"
+            "    _tub.list_repo_templates = _safe_lrt\n"
             "from cosmos_framework.scripts.convert_model_to_diffusers import main\n"
             "main()\n"
         )
