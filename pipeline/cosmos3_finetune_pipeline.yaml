@@ -751,8 +751,12 @@ deploymentSpec:
           .tar\", delete=False) as tmp:\n        layer_tar = tmp.name\n\n    subprocess.run([\n\
           \        \"tar\", \"-cf\", layer_tar,\n        \"-C\", str(checkpoint_dir.parent),\n\
           \        checkpoint_dir.name,\n    ], check=True)\n\n    # crane append:\
-          \ base=ubi9-micro, one layer = checkpoint tar\n    subprocess.run([\n  \
-          \      str(crane), \"append\",\n        \"--base\", \"registry.access.redhat.com/ubi9/ubi-micro:latest\"\
+          \ base=ubi9-micro (arm64 -- Thor is Jetson aarch64).\n    # crane defaults\
+          \ to amd64 when resolving a multi-arch base, which produces\n    # an x86_64\
+          \ image that fails with \"Exec format error\" on Thor. Pinning to\n    #\
+          \ linux/arm64 ensures bash/cp in the initContainer works on the Jetson.\n\
+          \    subprocess.run([\n        str(crane), \"append\",\n        \"--platform\"\
+          , \"linux/arm64\",\n        \"--base\", \"registry.access.redhat.com/ubi9/ubi-micro:latest\"\
           ,\n        \"--new_layer\", layer_tar,\n        \"--new_tag\", image_ref,\n\
           \    ], check=True, env=crane_env)\n\n    os.unlink(layer_tar)\n\n    #\
           \ Resolve by digest (per D014 convention)\n    result = subprocess.run(\n\

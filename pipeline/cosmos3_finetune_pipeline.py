@@ -596,9 +596,13 @@ def package_modelcar(
         checkpoint_dir.name,
     ], check=True)
 
-    # crane append: base=ubi9-micro, one layer = checkpoint tar
+    # crane append: base=ubi9-micro (arm64 -- Thor is Jetson aarch64).
+    # crane defaults to amd64 when resolving a multi-arch base, which produces
+    # an x86_64 image that fails with "Exec format error" on Thor. Pinning to
+    # linux/arm64 ensures bash/cp in the initContainer works on the Jetson.
     subprocess.run([
         str(crane), "append",
+        "--platform", "linux/arm64",
         "--base", "registry.access.redhat.com/ubi9/ubi-micro:latest",
         "--new_layer", layer_tar,
         "--new_tag", image_ref,
