@@ -498,11 +498,22 @@ deploymentSpec:
           \ reaches model\n        # instantiation. NOT marker-gated: training's `uv\
           \ run` re-syncs the\n        # lockfile (diffusers 0.39.0 / hub 0.36) every\
           \ run, so we reinstall\n        # after training each time.\n        venv_python\
-          \ = str(cf_dir / \".venv\" / \"bin\" / \"python\")\n        print(\"[finetune]\
-          \ installing diffusers main + hub>=1.23 for Edge convert...\")\n       \
-          \ subprocess.run([\n            uv_bin, \"pip\", \"install\", \"--python\"\
-          , venv_python, \"--no-deps\",\n            \"huggingface-hub>=1.23,<2.0\"\
-          ,\n            \"diffusers @ git+https://github.com/huggingface/diffusers.git\"\
+          \ = str(cf_dir / \".venv\" / \"bin\" / \"python\")\n        # Install the\
+          \ Edge-capable Diffusers build. Converting a Cosmos3 Edge\n        # checkpoint\
+          \ requires Cosmos3EdgeUniPCMultistepScheduler, which is NOT\n        # in\
+          \ diffusers main -- it lives in the still-open PR #14272\n        # (\"\
+          Add Cosmos3 Edge UniPC scheduler\", huggingface/diffusers), on the\n   \
+          \     # fork branch atharvajoshi10/diffusers@fix/cosmos3-edge-unipc-parity.\n\
+          \        # That branch is based on recent main (same hub>=1.23 requirement)\
+          \ and\n        # additionally exports the Edge scheduler + Edge transformer.\
+          \ This is\n        # the \"Edge-capable diffusers-cosmos3 build\" the converter's\
+          \ own error\n        # messages reference. Pin the exact commit for reproducibility.\n\
+          \        _DIFFUSERS_EDGE_REF = (\n            \"git+https://github.com/atharvajoshi10/diffusers.git\"\
+          \n            \"@c3e62e55fec7df0d84f5aa46f98c8259e4f02897\"\n        )\n\
+          \        print(\"[finetune] installing Edge-capable diffusers (PR #14272)\
+          \ + hub>=1.23...\")\n        subprocess.run([\n            uv_bin, \"pip\"\
+          , \"install\", \"--python\", venv_python, \"--no-deps\",\n            \"\
+          huggingface-hub>=1.23,<2.0\",\n            f\"diffusers @ {_DIFFUSERS_EDGE_REF}\"\
           ,\n        ], cwd=str(cf_dir), env=train_env, check=True)\n\n        # Wrapper\
           \ that reconciles transformers 4.57 with huggingface-hub 1.x.\n        #\
           \ Two incompatibilities, both patched before importing the converter:\n\
@@ -566,30 +577,33 @@ deploymentSpec:
           \            \"sys.modules['transformers.dependency_versions_check'] = _s;\
           \ \"\n             \"import huggingface_hub, transformers, diffusers; \"\
           \n             \"from diffusers import Cosmos3OmniTransformer, Cosmos3OmniPipeline;\
+          \ \"\n             \"from diffusers import Cosmos3EdgeUniPCMultistepScheduler;\
           \ \"\n             \"from cosmos_framework.scripts.convert_model_to_diffusers\
           \ import main; \"\n             \"import inspect; \"\n             \"p =\
           \ inspect.signature(Cosmos3OmniTransformer.__init__).parameters; \"\n  \
           \           \"assert 'hidden_act' in p, f'missing hidden_act, have {list(p)}';\
+          \ \"\n             \"assert Cosmos3EdgeUniPCMultistepScheduler is not None;\
           \ \"\n             \"print(f'[finetune] verified: hub={huggingface_hub.__version__}\
           \ \"\n             \"tf={transformers.__version__} diffusers={diffusers.__version__}\
-          \ Edge=OK')\"],\n            cwd=str(cf_dir), env=train_env, capture_output=True,\
-          \ text=True)\n        if result.returncode != 0:\n            print(f\"\
-          [finetune] verify FAILED:\\n{result.stdout}\\n{result.stderr}\")\n     \
-          \       raise RuntimeError(\"diffusers/transformers env not ready for Edge\
-          \ convert\")\n        print(result.stdout.strip())\n\n        # Pre-download\
-          \ the Diffusers-format Wan2.2 VAE into the HF cache. The\n        # converter\
-          \ builds a diffusers AutoencoderKLWan via\n        # AutoencoderKLWan.from_pretrained(\"\
-          Wan-AI/Wan2.2-TI2V-5B-Diffusers\").\n        # diffusers' own from_pretrained\
-          \ HTTP path fails to reach the Hub from\n        # this pod (\"couldn't\
-          \ connect\"), then falls back to a non-existent .bin\n        # and hard-fails\
-          \ -- even though the cosmos-framework `hf download` CLI\n        # and huggingface_hub\
-          \ both CAN reach the Hub. So we pre-fetch the vae/\n        # subfolder\
-          \ with huggingface_hub (authenticated via HF_TOKEN), then run\n        #\
-          \ the convert with HF_HUB_OFFLINE=1 so diffusers reads from the local\n\
-          \        # cache instead of hitting the network.\n        print(\"[finetune]\
-          \ pre-downloading Wan2.2 Diffusers VAE into HF cache...\")\n        dl =\
-          \ subprocess.run(\n            [venv_python, \"-c\",\n             \"from\
-          \ huggingface_hub import snapshot_download; \"\n             \"p = snapshot_download('Wan-AI/Wan2.2-TI2V-5B-Diffusers',\
+          \ Edge=OK EdgeSched=OK')\"],\n            cwd=str(cf_dir), env=train_env,\
+          \ capture_output=True, text=True)\n        if result.returncode != 0:\n\
+          \            print(f\"[finetune] verify FAILED:\\n{result.stdout}\\n{result.stderr}\"\
+          )\n            raise RuntimeError(\"diffusers/transformers env not ready\
+          \ for Edge convert\")\n        print(result.stdout.strip())\n\n        #\
+          \ Pre-download the Diffusers-format Wan2.2 VAE into the HF cache. The\n\
+          \        # converter builds a diffusers AutoencoderKLWan via\n        #\
+          \ AutoencoderKLWan.from_pretrained(\"Wan-AI/Wan2.2-TI2V-5B-Diffusers\").\n\
+          \        # diffusers' own from_pretrained HTTP path fails to reach the Hub\
+          \ from\n        # this pod (\"couldn't connect\"), then falls back to a\
+          \ non-existent .bin\n        # and hard-fails -- even though the cosmos-framework\
+          \ `hf download` CLI\n        # and huggingface_hub both CAN reach the Hub.\
+          \ So we pre-fetch the vae/\n        # subfolder with huggingface_hub (authenticated\
+          \ via HF_TOKEN), then run\n        # the convert with HF_HUB_OFFLINE=1 so\
+          \ diffusers reads from the local\n        # cache instead of hitting the\
+          \ network.\n        print(\"[finetune] pre-downloading Wan2.2 Diffusers\
+          \ VAE into HF cache...\")\n        dl = subprocess.run(\n            [venv_python,\
+          \ \"-c\",\n             \"from huggingface_hub import snapshot_download;\
+          \ \"\n             \"p = snapshot_download('Wan-AI/Wan2.2-TI2V-5B-Diffusers',\
           \ \"\n             \"allow_patterns=['vae/*']); \"\n             \"print('[finetune]\
           \ VAE cached at', p)\"],\n            cwd=str(cf_dir), env=train_env, capture_output=True,\
           \ text=True)\n        print(dl.stdout.strip())\n        if dl.returncode\

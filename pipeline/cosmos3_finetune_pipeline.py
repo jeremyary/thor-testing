@@ -418,11 +418,24 @@ def finetune_cosmos3(
         # lockfile (diffusers 0.39.0 / hub 0.36) every run, so we reinstall
         # after training each time.
         venv_python = str(cf_dir / ".venv" / "bin" / "python")
-        print("[finetune] installing diffusers main + hub>=1.23 for Edge convert...")
+        # Install the Edge-capable Diffusers build. Converting a Cosmos3 Edge
+        # checkpoint requires Cosmos3EdgeUniPCMultistepScheduler, which is NOT
+        # in diffusers main -- it lives in the still-open PR #14272
+        # ("Add Cosmos3 Edge UniPC scheduler", huggingface/diffusers), on the
+        # fork branch atharvajoshi10/diffusers@fix/cosmos3-edge-unipc-parity.
+        # That branch is based on recent main (same hub>=1.23 requirement) and
+        # additionally exports the Edge scheduler + Edge transformer. This is
+        # the "Edge-capable diffusers-cosmos3 build" the converter's own error
+        # messages reference. Pin the exact commit for reproducibility.
+        _DIFFUSERS_EDGE_REF = (
+            "git+https://github.com/atharvajoshi10/diffusers.git"
+            "@c3e62e55fec7df0d84f5aa46f98c8259e4f02897"
+        )
+        print("[finetune] installing Edge-capable diffusers (PR #14272) + hub>=1.23...")
         subprocess.run([
             uv_bin, "pip", "install", "--python", venv_python, "--no-deps",
             "huggingface-hub>=1.23,<2.0",
-            "diffusers @ git+https://github.com/huggingface/diffusers.git",
+            f"diffusers @ {_DIFFUSERS_EDGE_REF}",
         ], cwd=str(cf_dir), env=train_env, check=True)
 
         # Wrapper that reconciles transformers 4.57 with huggingface-hub 1.x.
@@ -497,12 +510,14 @@ def finetune_cosmos3(
              "sys.modules['transformers.dependency_versions_check'] = _s; "
              "import huggingface_hub, transformers, diffusers; "
              "from diffusers import Cosmos3OmniTransformer, Cosmos3OmniPipeline; "
+             "from diffusers import Cosmos3EdgeUniPCMultistepScheduler; "
              "from cosmos_framework.scripts.convert_model_to_diffusers import main; "
              "import inspect; "
              "p = inspect.signature(Cosmos3OmniTransformer.__init__).parameters; "
              "assert 'hidden_act' in p, f'missing hidden_act, have {list(p)}'; "
+             "assert Cosmos3EdgeUniPCMultistepScheduler is not None; "
              "print(f'[finetune] verified: hub={huggingface_hub.__version__} "
-             "tf={transformers.__version__} diffusers={diffusers.__version__} Edge=OK')"],
+             "tf={transformers.__version__} diffusers={diffusers.__version__} Edge=OK EdgeSched=OK')"],
             cwd=str(cf_dir), env=train_env, capture_output=True, text=True)
         if result.returncode != 0:
             print(f"[finetune] verify FAILED:\n{result.stdout}\n{result.stderr}")
