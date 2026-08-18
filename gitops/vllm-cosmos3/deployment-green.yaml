@@ -57,7 +57,11 @@ spec:
               mountPath: /hf-cache
       containers:
         - name: cosmos3
-          image: docker.io/vllm/vllm-omni:cosmos3
+          # Pin to the original cosmos3 arm64 image that predates the
+          # _validate_supported_config check (which rejects Edge's
+          # qk_norm_for_text=False). The cosmos3 tag was re-pushed Jul 20
+          # with a newer image that added this validation.
+          image: docker.io/vllm/vllm-omni@sha256:5cba1538c6f8ee81e8bea6708c24e68d7b2640f466a9fbf2ef15e68f2168b48b
           imagePullPolicy: IfNotPresent
           command: ["bash", "/scripts/entrypoint.sh"]
           ports:
