@@ -570,10 +570,38 @@ deploymentSpec:
           \ text=True)\n        print(dl.stdout.strip())\n        if dl.returncode\
           \ != 0:\n            print(f\"[finetune] VAE pre-download FAILED:\\n{dl.stderr}\"\
           )\n            raise RuntimeError(\"could not pre-cache Wan2.2 Diffusers\
-          \ VAE\")\n\n        print(f\"[finetune] Step 6b: converting to diffusers\
-          \ -> {scratch_diffusers}...\")\n        # Use venv python directly (not\
-          \ uv run) so the lockfile doesn't re-sync\n        # and revert the diffusers\
-          \ main install. The VAE is now pre-cached via\n        # huggingface_hub,\
+          \ VAE\")\n\n        # DIAGNOSTIC: check whether the converter will detect\
+          \ this export as an\n        # Edge checkpoint. If not, it silently takes\
+          \ the non-Edge path and drops\n        # backbone_type/rope_scaling/vision_encoder,\
+          \ which breaks vllm-omni's\n        # Edge transformer dispatch. Print the\
+          \ detection result + the config\n        # fields it keys on, so we have\
+          \ ground truth.\n        diag = subprocess.run(\n            [venv_python,\
+          \ \"-c\",\n             \"import json, sys, types; \"\n             \"_s=types.ModuleType('transformers.dependency_versions_check');\
+          \ \"\n             \"_s.dep_version_check=lambda *a,**k: None; \"\n    \
+          \         \"sys.modules['transformers.dependency_versions_check']=_s; \"\
+          \n             \"cfg=json.load(open('%s/config.json')); \"\n           \
+          \  \"m=cfg.get('model',{}); \"\n             \"mc=m.get('config',{}); \"\
+          \n             \"vlm=mc.get('vlm_config',{}); \"\n             \"mi=vlm.get('model_instance',{});\
+          \ \"\n             \"pw=vlm.get('pretrained_weights',{}); \"\n         \
+          \    \"print('[diag] top-level keys:', list(cfg.keys())); \"\n         \
+          \    \"print('[diag] model.config.vlm_config.model_instance._target_:',\
+          \ mi.get('_target_') or mi.get('_target')); \"\n             \"print('[diag]\
+          \ pretrained_weights.checkpoint_format:', pw.get('checkpoint_format'));\
+          \ \"\n             \"from cosmos_framework.scripts.convert_model_to_diffusers\
+          \ import _is_edge_model_config; \"\n             \"from cosmos_framework.inference.common.public_model_config\
+          \ import load_model_config_from_hf_config; \"\n             \"md=load_model_config_from_hf_config(cfg);\
+          \ \"\n             \"print('[diag] loaded model_dict keys:', list(md.keys()));\
+          \ \"\n             \"mdc=md.get('config',{}); mdvlm=mdc.get('vlm_config',{});\
+          \ mdmi=mdvlm.get('model_instance',{}); \"\n             \"print('[diag]\
+          \ restored model_instance._target_:', mdmi.get('_target_')); \"\n      \
+          \       \"print('[diag] _is_edge_model_config ->', _is_edge_model_config(md))\"\
+          \n             % str(scratch_export)],\n            cwd=str(cf_dir), env=train_env,\
+          \ capture_output=True, text=True)\n        print(diag.stdout.strip())\n\
+          \        if diag.stderr.strip():\n            print(\"[diag] stderr:\",\
+          \ diag.stderr.strip()[-2000:])\n\n        print(f\"[finetune] Step 6b: converting\
+          \ to diffusers -> {scratch_diffusers}...\")\n        # Use venv python directly\
+          \ (not uv run) so the lockfile doesn't re-sync\n        # and revert the\
+          \ diffusers main install. The VAE is now pre-cached via\n        # huggingface_hub,\
           \ so diffusers' from_pretrained finds it locally; other\n        # repos\
           \ (reasoner, tokenizer) were fully fetched by export_model. We do\n    \
           \    # NOT force HF_HUB_OFFLINE so any remaining small metadata fetches\
