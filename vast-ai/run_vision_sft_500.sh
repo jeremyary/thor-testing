@@ -9,8 +9,13 @@
 # package as the v2 modelcar for the demo's visible v1-vs-v2 comparison.
 #
 # USAGE (on the vast.ai box, as root or a sudo user):
-#   export HF_TOKEN=<your jeremyary token with gated Cosmos-1.0-Guardrail access>
+#   export HF_TOKEN=<jeremyary token with gated nvidia/Cosmos3-Edge access>
 #   bash run_vision_sft_500.sh
+#
+# Only ONE credential is needed on the box: HF_TOKEN, for the gated
+# nvidia/Cosmos3-Edge repo (base weights + reasoner snapshot the converter
+# pulls). The guardrail repos and cluster registry are NOT touched here --
+# packaging/signing the modelcar happens back on the hub cluster.
 #
 # Prereqs on the instance:
 #   - 8x H100 80GB (or 4x; set NPROC below), CUDA >= 13.0, NVLink
@@ -30,14 +35,18 @@ NPROC="${NPROC:-8}"                                  # 8x H100
 WORK="${WORK:-/workspace}"
 DIFFUSERS_EDGE_REF="git+https://github.com/atharvajoshi10/diffusers.git@c3e62e55fec7df0d84f5aa46f98c8259e4f02897"
 
-: "${HF_TOKEN:?export HF_TOKEN=<token with gated nvidia/Cosmos-1.0-Guardrail access> first}"
+: "${HF_TOKEN:?export HF_TOKEN=<token with gated nvidia/Cosmos3-Edge access> first}"
 export HF_TOKEN HF_HUB_DISABLE_XET=1
 export HF_HOME="${WORK}/hf"
 mkdir -p "$WORK" "$HF_HOME"
 cd "$WORK"
 
 echo ">>> [1/7] system deps + uv"
-command -v git  >/dev/null || { apt-get update && apt-get install -y git curl; }
+# ffprobe/ffmpeg: the cosmos-framework video dataloader shells out to them to
+# read the BridgeData2 .mp4 clips; without ffprobe training dies in the
+# DataLoader worker ("No such file or directory: 'ffprobe'").
+command -v git ffprobe >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y git curl ffmpeg; }
+command -v ffprobe >/dev/null || { apt-get update -qq && apt-get install -y ffmpeg; }
 command -v uv   >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -52,11 +61,25 @@ CF_DIR="$(pwd)"
 echo ">>> [3/7] uv sync (cu130-train) — matches Thor pipeline"
 uv sync --all-extras --group=cu130-train
 VENV_PY="$CF_DIR/.venv/bin/python"
+# HARDENING: --all-extras activates every CUDA group (cu128 AND cu130), so uv
+# resolves torch to the newest (2.13.0), whose torchvision breaks with
+# "operator torchvision::nms does not exist" and kills the transformers
+# PreTrainedModel import at DCP-convert. Force the exact stack Thor validated
+# (torch 2.10.0+cu130 / torchvision 0.25.0+cu130) from the pytorch cu130 index.
+echo ">>> [3b/7] pin torch 2.10.0+cu130 stack (override --all-extras drift)"
+uv pip install --python "$VENV_PY" \
+  "torch==2.10.0+cu130" "torchvision==0.25.0+cu130" \
+  --index-url https://download.pytorch.org/whl/cu130
+"$VENV_PY" -c "from transformers import PreTrainedModel; import torchvision; print('[setup] torch/transformers import OK')"
 
 echo ">>> [4/7] convert base Cosmos3-Edge HF -> DCP"
+# IMPORTANT: use the venv python directly (NOT `uv run`). `uv run` re-syncs from
+# uv.lock on every invocation, which re-pulls torch 2.13.0 and re-breaks
+# torchvision -- undoing the [3b] pin. Direct venv python preserves the pinned
+# stack. PYTHONPATH=. mirrors what the launcher/`uv run` set.
 DCP_DIR="$CF_DIR/examples/checkpoints/Cosmos3-Edge"
 if [[ ! -d "$DCP_DIR" ]]; then
-  uv run python -m cosmos_framework.scripts.convert_model_to_dcp \
+  PYTHONPATH="$CF_DIR" "$VENV_PY" -m cosmos_framework.scripts.convert_model_to_dcp \
     -o "$DCP_DIR" --checkpoint-path "Cosmos3-Edge"
 fi
 WAN_VAE="$(find "$HF_HOME" -name 'Wan2.2_VAE.pth' | head -1)"
@@ -66,7 +89,7 @@ echo ">>> [5/7] stage BridgeData2-Subset dataset"
 DATA_ROOT="$CF_DIR/examples/data/BridgeData2-Subset-Synthetic-Captions"
 SFT_DIR="$DATA_ROOT/sft_dataset_bridge"
 if [[ ! -f "$SFT_DIR/train/video_dataset_file.jsonl" ]]; then
-  uv run python -c "
+  "$VENV_PY" -c "
 from huggingface_hub import snapshot_download
 p = snapshot_download('nvidia/BridgeData2-Subset-Synthetic-Captions',
                       repo_type='dataset', local_dir='$DATA_ROOT')
@@ -111,6 +134,10 @@ export WAN_VAE_PATH="$WAN_VAE"
 export NPROC_PER_NODE="$NPROC"
 export IMAGINAIRE_OUTPUT_ROOT="$WORK/outputs/train"
 export TAIL_OVERRIDES=("trainer.callbacks.generation.every_n_sample_reg.every_n=$((MAX_ITER/5))")
+# Put the venv bin first on PATH + activate it so the launcher's `torchrun`
+# resolves to the venv's (pinned torch 2.10) instead of re-syncing via uv.
+export VIRTUAL_ENV="$CF_DIR/.venv"
+export PATH="$CF_DIR/.venv/bin:$PATH"
 
 bash examples/launch_sft_vision_edge.sh
 
@@ -120,7 +147,7 @@ CKPT_ITER="$(cat "$RUN_SUBDIR/checkpoints/latest_checkpoint.txt")"
 CKPT_PATH="$RUN_SUBDIR/checkpoints/$CKPT_ITER"
 CONFIG_F="$RUN_SUBDIR/config.yaml"
 echo ">>> exporting $CKPT_ITER -> safetensors"
-uv run python -m cosmos_framework.scripts.export_model \
+PYTHONPATH="$CF_DIR" "$VENV_PY" -m cosmos_framework.scripts.export_model \
   --checkpoint-path "$CKPT_PATH" --config-file "$CONFIG_F" -o "$WORK/exported_model"
 
 echo ">>> installing Edge-capable diffusers (PR #14272) for convert"
