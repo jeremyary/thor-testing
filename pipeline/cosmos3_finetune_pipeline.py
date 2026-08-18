@@ -293,7 +293,21 @@ def finetune_cosmos3(
     # Set max_iter and save_iter to user's requested steps
     toml_text = re.sub(r"max_iter\s*=\s*\d+", f"max_iter                = {max_steps}", toml_text)
     toml_text = re.sub(r"save_iter\s*=\s*\d+", f"save_iter            = {max_steps}", toml_text)
+    # Scale the LR warmup to the run length. The shipped recipe uses
+    # warm_up_steps=[50] with grad_accum_iter=2, so a short run (e.g. 10 iters =
+    # 5 optimizer steps) never leaves warmup: LR stays ~0-8e-6 (10000x below
+    # peak) and, with plain AdamW updating bf16 weights (no FP32 master), the
+    # sub-ULP updates round to zero -> exported weights are byte-identical to
+    # base. That makes "v1 vs v2" meaningless. Scale warmup to ~10% of max_iter
+    # (min 1) so training actually reaches peak LR and moves the generation
+    # weights within a demo-sized run. (Verified root cause via cosmos-framework
+    # optimizer/scheduler source: warm_up_steps=[50], f_start=[0.0].)
+    warmup = max(1, max_steps // 10)
+    toml_text = re.sub(r"warm_up_steps\s*=\s*\[\s*\d+\s*\]",
+                       f"warm_up_steps = [{warmup}]", toml_text)
     toml_path.write_text(toml_text)
+    print(f"[finetune] recipe patched: max_iter={max_steps} save_iter={max_steps} "
+          f"warm_up_steps={warmup}")
 
     # -----------------------------------------------------------------------
     # Step 5: Run training via the real launch_sft_vision_edge.sh
