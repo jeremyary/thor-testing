@@ -49,7 +49,7 @@ spec:
       # is valid/deployable from the start even before a real promotion.
       initContainers:
         - name: fetch-model
-          image: default-route-openshift-image-registry.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com/thor-builds/cosmos3-edge-modelcar@sha256:e2e287e704b8c09f9136839e58da648c54b1a1caae5ac92b536f8b812aad0acf
+          image: default-route-openshift-image-registry.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com/thor-builds/cosmos3-edge-modelcar@sha256:d950c798cb802c6e2e8c1e54aaf71cc65bc1fea5f3f095ea2d92c13a69362abf
           imagePullPolicy: IfNotPresent
           command: ["bash", "-c", "cp -a /models/huggingface/. /hf-cache/"]
           volumeMounts:
@@ -82,7 +82,7 @@ spec:
             # MODEL_VERSION is read by robot-sim / OTel to stamp the model on
             # all traces. Update this alongside the modelcar digest when promoting.
             - name: MODEL_VERSION
-              value: "cosmos3-edge-v2"
+              value: "cosmos3-edge-v2-500iter"
           resources:
             limits:
               nvidia.com/gpu: "1"
