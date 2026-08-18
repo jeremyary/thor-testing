@@ -532,7 +532,32 @@ deploymentSpec:
           \ imported the name directly; patch there too\\n\"\n            \"import\
           \ transformers.tokenization_utils_base as _tub\\n\"\n            \"if hasattr(_tub,\
           \ 'list_repo_templates'):\\n\"\n            \"    _tub.list_repo_templates\
-          \ = _safe_lrt\\n\"\n            \"from cosmos_framework.scripts.convert_model_to_diffusers\
+          \ = _safe_lrt\\n\"\n            \"# (3) fix upstream Edge-detection bug\
+          \ in _is_edge_exported_checkpoint.\\n\"\n            \"# The low-level converter\
+          \ sniffs the export config's model_instance\\n\"\n            \"# _target\
+          \ for 'Nemotron3' (capital) or 'nemotron_3_dense_vl' (with an\\n\"\n   \
+          \         \"# underscore after nemotron). But export_model writes the PUBLIC\
+          \ ALIAS\\n\"\n            \"# 'nemotron3_dense_vl_text_for_causal_lm' (lowercase,\
+          \ NO underscore\\n\"\n            \"# after nemotron -- see public_model_config._TARGET_ALIASES).\
+          \ So the\\n\"\n            \"# check misses it and the converter silently\
+          \ takes the non-Edge path,\\n\"\n            \"# dropping backbone_type/rope_scaling/vision_encoder\
+          \ and emitting the\\n\"\n            \"# generic scheduler -- which then\
+          \ fails vllm-omni's Edge dispatch.\\n\"\n            \"# Wrap the sniff\
+          \ to also accept the real alias spelling. This only\\n\"\n            \"\
+          # corrects Edge *recognition*; the conversion logic itself is NVIDIA's.\\\
+          n\"\n            \"import cosmos_framework.scripts._convert_model_to_diffusers\
+          \ as _cmd\\n\"\n            \"_orig_sniff = _cmd._is_edge_exported_checkpoint\\\
+          n\"\n            \"def _fixed_sniff(checkpoint_path):\\n\"\n           \
+          \ \"    if _orig_sniff(checkpoint_path):\\n\"\n            \"        return\
+          \ True\\n\"\n            \"    import json as _json, pathlib as _pl\\n\"\
+          \n            \"    p = _pl.Path(checkpoint_path) / 'config.json'\\n\"\n\
+          \            \"    if not p.is_file():\\n\"\n            \"        return\
+          \ False\\n\"\n            \"    cfg = _json.loads(p.read_text())\\n\"\n\
+          \            \"    mi = cfg.get('model', {}).get('config', {}).get('vlm_config',\
+          \ {}).get('model_instance', {})\\n\"\n            \"    tgt = str(mi.get('_target_')\
+          \ or mi.get('_target') or '').lower()\\n\"\n            \"    return 'nemotron3_dense_vl'\
+          \ in tgt or 'nemotron_3_dense_vl' in tgt\\n\"\n            \"_cmd._is_edge_exported_checkpoint\
+          \ = _fixed_sniff\\n\"\n            \"from cosmos_framework.scripts.convert_model_to_diffusers\
           \ import main\\n\"\n            \"main()\\n\"\n        )\n\n        # Verify\
           \ the full import chain + Edge support before the real convert.\n      \
           \  result = subprocess.run(\n            [venv_python, \"-c\",\n       \
