@@ -575,30 +575,29 @@ deploymentSpec:
           \ the non-Edge path and drops\n        # backbone_type/rope_scaling/vision_encoder,\
           \ which breaks vllm-omni's\n        # Edge transformer dispatch. Print the\
           \ detection result + the config\n        # fields it keys on, so we have\
-          \ ground truth.\n        diag = subprocess.run(\n            [venv_python,\
-          \ \"-c\",\n             \"import json, sys, types; \"\n             \"_s=types.ModuleType('transformers.dependency_versions_check');\
-          \ \"\n             \"_s.dep_version_check=lambda *a,**k: None; \"\n    \
-          \         \"sys.modules['transformers.dependency_versions_check']=_s; \"\
-          \n             \"cfg=json.load(open('%s/config.json')); \"\n           \
-          \  \"m=cfg.get('model',{}); \"\n             \"mc=m.get('config',{}); \"\
-          \n             \"vlm=mc.get('vlm_config',{}); \"\n             \"mi=vlm.get('model_instance',{});\
-          \ \"\n             \"pw=vlm.get('pretrained_weights',{}); \"\n         \
-          \    \"print('[diag] top-level keys:', list(cfg.keys())); \"\n         \
-          \    \"print('[diag] model.config.vlm_config.model_instance._target_:',\
-          \ mi.get('_target_') or mi.get('_target')); \"\n             \"print('[diag]\
-          \ pretrained_weights.checkpoint_format:', pw.get('checkpoint_format'));\
-          \ \"\n             \"from cosmos_framework.scripts.convert_model_to_diffusers\
-          \ import _is_edge_model_config; \"\n             \"from cosmos_framework.inference.common.public_model_config\
-          \ import load_model_config_from_hf_config; \"\n             \"md=load_model_config_from_hf_config(cfg);\
-          \ \"\n             \"print('[diag] loaded model_dict keys:', list(md.keys()));\
-          \ \"\n             \"mdc=md.get('config',{}); mdvlm=mdc.get('vlm_config',{});\
-          \ mdmi=mdvlm.get('model_instance',{}); \"\n             \"print('[diag]\
-          \ restored model_instance._target_:', mdmi.get('_target_')); \"\n      \
-          \       \"print('[diag] _is_edge_model_config ->', _is_edge_model_config(md))\"\
-          \n             % str(scratch_export)],\n            cwd=str(cf_dir), env=train_env,\
-          \ capture_output=True, text=True)\n        print(diag.stdout.strip())\n\
+          \ ground truth.\n        diag_code = (\n            \"import sys, types,\
+          \ json\\n\"\n            \"_s=types.ModuleType('transformers.dependency_versions_check')\\\
+          n\"\n            \"_s.dep_version_check=lambda *a,**k: None\\n\"\n     \
+          \       \"sys.modules['transformers.dependency_versions_check']=_s\\n\"\n\
+          \            \"from cosmos_framework.scripts.convert_model_to_diffusers\
+          \ import _is_edge_model_config\\n\"\n            \"from cosmos_framework.inference.common.args\
+          \ import CheckpointOverrides\\n\"\n            \"from cosmos_framework.inference.args\
+          \ import OmniSetupOverrides\\n\"\n            \"ckpt = CheckpointOverrides(checkpoint_path='%s')\\\
+          n\"\n            \"cc = ckpt.build_checkpoint(checkpoints=OmniSetupOverrides.CHECKPOINTS)\\\
+          n\"\n            \"print('[diag] resolved checkpoint_path:', cc.checkpoint_path)\\\
+          n\"\n            \"print('[diag] config_file:', cc.config_file)\\n\"\n \
+          \           \"md = cc.load_model_config_dict()\\n\"\n            \"print('[diag]\
+          \ model_dict keys:', list(md.keys()))\\n\"\n            \"mc = md.get('config',\
+          \ {}); vlm = mc.get('vlm_config', {})\\n\"\n            \"mi = vlm.get('model_instance',\
+          \ {}); pw = vlm.get('pretrained_weights', {})\\n\"\n            \"print('[diag]\
+          \ model_instance._target_:', mi.get('_target_'))\\n\"\n            \"print('[diag]\
+          \ pretrained_weights.checkpoint_format:', pw.get('checkpoint_format'))\\\
+          n\"\n            \"print('[diag] REAL-PATH _is_edge_model_config ->', _is_edge_model_config(md))\\\
+          n\"\n        ) % str(scratch_export)\n        diag = subprocess.run(\n \
+          \           [venv_python, \"-c\", diag_code],\n            cwd=str(cf_dir),\
+          \ env=train_env, capture_output=True, text=True)\n        print(diag.stdout.strip())\n\
           \        if diag.stderr.strip():\n            print(\"[diag] stderr:\",\
-          \ diag.stderr.strip()[-2000:])\n\n        print(f\"[finetune] Step 6b: converting\
+          \ diag.stderr.strip()[-3000:])\n\n        print(f\"[finetune] Step 6b: converting\
           \ to diffusers -> {scratch_diffusers}...\")\n        # Use venv python directly\
           \ (not uv run) so the lockfile doesn't re-sync\n        # and revert the\
           \ diffusers main install. The VAE is now pre-cached via\n        # huggingface_hub,\

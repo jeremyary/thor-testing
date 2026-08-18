@@ -512,33 +512,32 @@ def finetune_cosmos3(
         # backbone_type/rope_scaling/vision_encoder, which breaks vllm-omni's
         # Edge transformer dispatch. Print the detection result + the config
         # fields it keys on, so we have ground truth.
+        diag_code = (
+            "import sys, types, json\n"
+            "_s=types.ModuleType('transformers.dependency_versions_check')\n"
+            "_s.dep_version_check=lambda *a,**k: None\n"
+            "sys.modules['transformers.dependency_versions_check']=_s\n"
+            "from cosmos_framework.scripts.convert_model_to_diffusers import _is_edge_model_config\n"
+            "from cosmos_framework.inference.common.args import CheckpointOverrides\n"
+            "from cosmos_framework.inference.args import OmniSetupOverrides\n"
+            "ckpt = CheckpointOverrides(checkpoint_path='%s')\n"
+            "cc = ckpt.build_checkpoint(checkpoints=OmniSetupOverrides.CHECKPOINTS)\n"
+            "print('[diag] resolved checkpoint_path:', cc.checkpoint_path)\n"
+            "print('[diag] config_file:', cc.config_file)\n"
+            "md = cc.load_model_config_dict()\n"
+            "print('[diag] model_dict keys:', list(md.keys()))\n"
+            "mc = md.get('config', {}); vlm = mc.get('vlm_config', {})\n"
+            "mi = vlm.get('model_instance', {}); pw = vlm.get('pretrained_weights', {})\n"
+            "print('[diag] model_instance._target_:', mi.get('_target_'))\n"
+            "print('[diag] pretrained_weights.checkpoint_format:', pw.get('checkpoint_format'))\n"
+            "print('[diag] REAL-PATH _is_edge_model_config ->', _is_edge_model_config(md))\n"
+        ) % str(scratch_export)
         diag = subprocess.run(
-            [venv_python, "-c",
-             "import json, sys, types; "
-             "_s=types.ModuleType('transformers.dependency_versions_check'); "
-             "_s.dep_version_check=lambda *a,**k: None; "
-             "sys.modules['transformers.dependency_versions_check']=_s; "
-             "cfg=json.load(open('%s/config.json')); "
-             "m=cfg.get('model',{}); "
-             "mc=m.get('config',{}); "
-             "vlm=mc.get('vlm_config',{}); "
-             "mi=vlm.get('model_instance',{}); "
-             "pw=vlm.get('pretrained_weights',{}); "
-             "print('[diag] top-level keys:', list(cfg.keys())); "
-             "print('[diag] model.config.vlm_config.model_instance._target_:', mi.get('_target_') or mi.get('_target')); "
-             "print('[diag] pretrained_weights.checkpoint_format:', pw.get('checkpoint_format')); "
-             "from cosmos_framework.scripts.convert_model_to_diffusers import _is_edge_model_config; "
-             "from cosmos_framework.inference.common.public_model_config import load_model_config_from_hf_config; "
-             "md=load_model_config_from_hf_config(cfg); "
-             "print('[diag] loaded model_dict keys:', list(md.keys())); "
-             "mdc=md.get('config',{}); mdvlm=mdc.get('vlm_config',{}); mdmi=mdvlm.get('model_instance',{}); "
-             "print('[diag] restored model_instance._target_:', mdmi.get('_target_')); "
-             "print('[diag] _is_edge_model_config ->', _is_edge_model_config(md))"
-             % str(scratch_export)],
+            [venv_python, "-c", diag_code],
             cwd=str(cf_dir), env=train_env, capture_output=True, text=True)
         print(diag.stdout.strip())
         if diag.stderr.strip():
-            print("[diag] stderr:", diag.stderr.strip()[-2000:])
+            print("[diag] stderr:", diag.stderr.strip()[-3000:])
 
         print(f"[finetune] Step 6b: converting to diffusers -> {scratch_diffusers}...")
         # Use venv python directly (not uv run) so the lockfile doesn't re-sync
