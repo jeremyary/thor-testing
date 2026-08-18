@@ -573,3 +573,58 @@ For the flywheel to produce genuine training data, robot-sim would need to gener
 **Pipeline redesign:** The `finetune_cosmos3` KFP step must be rewritten to: (1) receive curated video+caption data in Vision SFT JSONL format, (2) run `convert_model_to_dcp` → `launch_sft_vision_edge.sh` → `export_model` → `convert_model_to_diffusers` using the empirically-validated environment recipe above. The existing Reasoner-SFT stub (D030 data format) is discarded entirely.
 
 **Files changed:** `DECISIONS.md` (this entry).
+
+**D033: Edge diffusers conversion + serving fixes (train→convert→serve now works end-to-end).**
+
+Getting the fine-tuned Cosmos3-Edge checkpoint to actually serve on Thor required
+fixing a chain of real issues in the export→convert→package→serve path:
+
+1. **Missing convert step.** The pipeline only ran `export_model` (Stage 1). Added
+   `convert_model_to_diffusers` (Stage 2) to produce the Diffusers pipeline layout
+   (transformer/, vae/, scheduler/, model_index.json) that vllm-omni loads.
+
+2. **Edge-capable diffusers.** Converting an Edge checkpoint needs diffusers with the
+   Edge transformer (hidden_act/qk_norm_for_text) AND `Cosmos3EdgeUniPCMultistepScheduler`.
+   The latter is NOT in diffusers main — it's in still-open PR #14272
+   (atharvajoshi10/diffusers@fix/cosmos3-edge-unipc-parity, pinned c3e62e55). diffusers
+   main needs huggingface-hub>=1.23, which conflicts with cosmos-framework's
+   transformers 4.57 (hub<1.0) only at transformers' runtime version *check* — worked
+   around with a dependency_versions_check stub + list_repo_templates patch in the
+   convert wrapper (bypasses assertions/metadata only, never weight logic).
+
+3. **Edge-detection bug (upstream).** `_is_edge_exported_checkpoint` sniffs the export
+   config's model_instance _target for "Nemotron3"/"nemotron_3_dense_vl", but
+   export_model writes the public alias "nemotron3_dense_vl_text_for_causal_lm"
+   (no underscore after nemotron). The sniff missed it → converter silently took the
+   non-Edge path (dropped backbone_type/rope_scaling/vision_encoder, wrong scheduler).
+   Still broken in cosmos-framework main. Patched the sniff in our convert wrapper to
+   accept the real alias spelling. Corrects Edge RECOGNITION only.
+
+4. **Guardrail model weights.** modelcar now bundles nvidia/Cosmos-1.0-Guardrail
+   (face_blur_filter + blocklist) + Qwen/Qwen3Guard-Gen-0.6B, matching the Tekton
+   modelcar's model-repos. Requires an HF token with gated access to
+   nvidia/Cosmos-1.0-Guardrail (hf-credentials secret → jeremyary's token).
+
+5. **Serving image.** The vllm-omni image must have the Edge transformer dispatch
+   (transformer_cosmos3_edge.py + resolve_cosmos3_transformer_cls, present in v0.26.0).
+   With backbone_type now set correctly in the modelcar, it dispatches to the Edge
+   transformer instead of failing the base transformer's qk_norm_for_text=True check.
+
+6. **DEFERRED — guardrails disabled for now.** vllm-omni requires the `cosmos-guardrail`
+   pip package (NOT in the image) to build CosmosSafetyChecker; guardrails-on (default)
+   hard-fails orchestrator init with a license-compliance ValueError. Added
+   `--no-guardrails` to the entrypoint (documented by NVIDIA's recipes/cosmos3/
+   Cosmos3-Edge.md for self-hosted runs). **TODO: for production, install
+   cosmos-guardrail in the serving image + gated HF token to re-enable safety checks.**
+   The guardrail model weights are already bundled in the modelcar (item 4), so only
+   the pip package + token are needed.
+
+**Verified:** the converted checkpoint's transformer/config.json matches the published
+nvidia/Cosmos3-Edge byte-for-byte (backbone_type=cosmos3_edge_nemotron_dense,
+Cosmos3EdgeUniPCMultistepScheduler flow_shift=3.0, rope_scaling mrope_section=[24,20,20],
+544 fine-tuned tensors preserved). The `config_factory.py:248 "cosmos3_edge not
+registered to an Omni pipeline"` warning is cosmetic (fires for all single-stage
+diffusion models including NVIDIA's own Nano/Super).
+
+**Files changed:** `pipeline/cosmos3_finetune_pipeline.py`, `gitops/vllm-cosmos3/
+deployment-green.yaml`, `gitops/vllm-cosmos3/entrypoint-configmap.yaml`, `DECISIONS.md`.

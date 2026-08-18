@@ -35,6 +35,17 @@ data:
         '--enforce-eager', '--gpu-memory-utilization', '0.5',
         '--max-model-len', '4096', '--init-timeout', '1800',
         '--trust-remote-code',
+        # Disable the Cosmos3 safety guardrails. vllm-omni requires the
+        # 'cosmos-guardrail' pip package (not in this image) to build the
+        # CosmosSafetyChecker; without it, guardrails-on (the default) hard-
+        # fails orchestrator init with a license-compliance ValueError.
+        # NVIDIA's own recipe (recipes/cosmos3/Cosmos3-Edge.md) documents
+        # --no-guardrails for self-hosted runs. This maps to
+        # model_config["guardrails"]=False in vllm_omni serve.py.
+        # TODO(guardrails): revisit for production -- install cosmos-guardrail
+        # + gated nvidia/Cosmos-1.0-Guardrail token to re-enable safety checks
+        # (we already bundle the guardrail model weights in the modelcar).
+        '--no-guardrails',
     ]
 
     from vllm.scripts import main
