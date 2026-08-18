@@ -32,8 +32,10 @@ curl -s http://10.0.0.42:30800/v1/models | python3 -m json.tool   # HTTP 200
 open http://10.0.0.42:30801
 ```
 Do **NOT** hit Clear Data — the pinned dream files are immutable and survive it,
-but skip it to keep the panel populated. Have two tabs ready: dashboard
-(primary) and Argo CD (one 20-second cutaway).
+but skip it to keep the panel populated. Have three tabs ready: dashboard
+(primary), Argo CD (one 20-second cutaway), and the **RHOAI MLflow** experiment
+`cosmos3-edge-wam-flywheel` with `v1-base` + `v2-500iter-graft` pre-selected in
+the Compare view (Beat 4).
 
 ### Beat 1 — "It's real, on the device" (~45s)
 Point at the dashboard model badge: **`cosmos3-edge-v2-500iter-graft`**.
@@ -59,7 +61,30 @@ world model computes what the arm *would* do, no physics engine. The left is the
 baseline; the right is after the flywheel's fine-tuning. You see the difference
 **before** it touches a fleet. That's dream-before-deploy."
 
-### Beat 4 — "And it's governed" (~30s, optional)
+### Beat 4 — "And it's tracked" (~30s, optional)
+Cut to the **RHOAI MLflow** tab → experiment **`cosmos3-edge-wam-flywheel`**.
+Select **`v1-base`** and **`v2-500iter-graft`** → **Compare**.
+
+**Point at exactly three things (ignore the rest):**
+1. **Training loss** — `train_loss_start` **2.69** → `train_loss_end` **1.43**
+   (`train_loss_delta` **1.26**, ~47% drop). "It actually learned."
+2. **Dream temporal stability** — `dream_temporal_stability` **0.044 (v1)** vs
+   **0.017 (v2)** — ~61% smoother frame-to-frame. "The fine-tuned rollout is
+   measurably more coherent — the number matches what you just saw."
+3. **`modelcar_digest`** differs per run (v1 `5c990c93…`, v2 `69da94f2…`) — each
+   is the **actual signed artifact** on Thor. "The experiment traces straight to
+   what's deployed on the device — registered model `cosmos3-edge` v1/v2."
+
+For the loss curve on camera: **Visualizations → line chart → Y=`train_loss_window`,
+X=step** shows the descending curve.
+
+> **What the NaNs mean (if asked):** `v1-base` is the *untuned* baseline, so
+> training-only metrics (loss, weight-delta, iterations) are blank/NaN for it —
+> that's correct, not a logging error. The shared metric that compares cleanly is
+> `dream_temporal_stability`. Dream videos are per-run under **Artifacts → dream/**
+> (the Compare view only shows artifacts common to both runs).
+
+### Beat 5 — "And it's governed" (~30s, optional)
 "Promotion is a signed-modelcar + GitOps blue/green flip — merge a PR, Argo
 syncs, CRI-O verifies the sigstore signature before the model ever loads. The
 full live version of that flip is in the long-form demo."
@@ -187,6 +212,14 @@ Click **Dream v2**. Compare side-by-side with v1 (both play instantly — pinned
 
 "Same frame, same action trajectory. Different model. The flywheel trained the Generator on robot manipulation data, and the prediction changed. This is what 'dream before deploy' means — you see the difference before it touches a fleet."
 
+### Experiment tracking (optional)
+
+Cut to **RHOAI MLflow** → experiment `cosmos3-edge-wam-flywheel` → Compare
+`v1-base` vs `v2-500iter-graft`: training loss 2.69→1.43, moe_gen weight-delta,
+dream MP4 attached per run, and the `cosmos3-edge` registered model (v1/v2) tagged
+with the deployed signed modelcar digest — experiment-to-artifact lineage. See
+§ Experiment Tracking (MLflow) for how these runs are logged.
+
 ---
 
 ## Reproducing the Pinned Dreams
@@ -212,6 +245,38 @@ base⇄v2 swap needs no re-pull.
 > BridgeData2 conditioning frame. The dreamer's default `size=320x192` produces
 > visibly degraded, temporally-incoherent rollouts on these square frames — the
 > pinned pair uses 256×256 for this reason.
+
+---
+
+## Experiment Tracking (MLflow)
+
+The runs shown in Beat 4 are logged to **RHOAI's MLflow** (experiment
+`cosmos3-edge-wam-flywheel`, in the `vla-training` Data Science Project — legacy
+namespace name; see DECISIONS.md D035). Logged via a CPU workbench in that project
+(`cosmos3-wam-tracking`), which auto-injects `MLFLOW_TRACKING_URI` + SA-token auth
+(the RHOAI MLflow uses a Kubernetes request-auth provider — the workbench needs
+`mlflow` + `kubernetes` pip installed).
+
+Two runs, genuine data:
+- **`v1-base`** — untuned reference; dream MP4 artifact; digest `5c990c93…`;
+  `dream_temporal_stability` **0.044**.
+- **`v2-500iter-graft`** — 500-iter Vision SFT on 8×H100; `train_loss` 2.69→1.43,
+  moe_gen weight-delta metrics, loss curve + dream MP4 artifacts; digest `69da94f2…`;
+  `dream_temporal_stability` **0.017** (~61% smoother than v1).
+
+`dream_temporal_stability` = mean absolute grayscale frame-to-frame difference of
+the rollout (normalized 0-1; lower = smoother/more temporally coherent). It is the
+one metric logged to **both** runs so the Compare view shows a real v1-vs-v2 bar
+rather than NaN. Caveat: it measures smoothness, not task success — it pairs with
+the visual coherence check, don't overclaim it as a quality score.
+
+Both registered as **`cosmos3-edge`** v1/v2 with a `modelcar_digest` tag linking the
+experiment to the signed artifact deployed on Thor. Source assets live in the repo
+at `dream-comparison/` (`dream_diag_base.mp4`, `dream_diag_v2graft.mp4`,
+`loss_curve.json`). To relog/refresh, re-run the logging cell (kept with the session
+tooling) against the workbench. This is a curated backfill for the recording; wiring
+`mlflow.log_*` into the KFP pipeline for auto-logging of future runs is a deferred
+roadmap item.
 
 ---
 
