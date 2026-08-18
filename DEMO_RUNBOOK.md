@@ -75,8 +75,18 @@ Select **`v1-base`** and **`v2-500iter-graft`** → **Compare**.
    is the **actual signed artifact** on Thor. "The experiment traces straight to
    what's deployed on the device — registered model `cosmos3-edge` v1/v2."
 
-For the loss curve on camera: **Visualizations → line chart → Y=`train_loss_window`,
-X=step** shows the descending curve.
+For the loss curve on camera: on the **experiment page → Chart view** (or the
+`v2-500iter-graft` run's **Metrics** tab), add a **line chart** with
+Y=`train_loss_window`, X=step — shows the descending 2.6→2.0 curve. This is the
+best on-camera visual ("it learned").
+
+> **Avoid the Compare page's "Parallel Coordinates Plot"** for this two-run demo —
+> it's built for large hyperparameter sweeps and renders as a near-empty/confusing
+> chart with only 2 runs (and v1's blank training params make it worse). If you
+> want a plotted stability comparison, use the **Box Plot** or **Scatter Plot** tab
+> with `dream_temporal_stability` (two clearly separated points: 0.044 vs 0.017).
+> Otherwise just use the **Run details / Compare table** below the plots — it shows
+> the two runs side by side cleanly.
 
 > **What the NaNs mean (if asked):** `v1-base` is the *untuned* baseline, so
 > training-only metrics (loss, weight-delta, iterations) are blank/NaN for it —
