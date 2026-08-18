@@ -887,7 +887,8 @@ deploymentSpec:
         - -c
         - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
           \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
-          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.17.0'\
+          \ python3 -m pip install --quiet --no-warn-script-location 'huggingface-hub==0.36.2'\
+          \  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.17.0'\
           \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
           $0\" \"$@\"\n"
         - sh
@@ -953,10 +954,31 @@ deploymentSpec:
           \ it\n    refs_dir = snap_dir.parent.parent / \"refs\"\n    refs_dir.mkdir(parents=True,\
           \ exist_ok=True)\n    (refs_dir / \"main\").write_text(snap_hash)\n\n  \
           \  print(f\"[package] staged {sum(1 for _ in snap_dir.rglob('*'))} files\
-          \ in HF cache layout (snap={snap_hash[:12]})\")\n\n    with tempfile.NamedTemporaryFile(suffix=\"\
-          .tar\", delete=False) as tmp:\n        layer_tar = tmp.name\n\n    subprocess.run([\n\
-          \        \"tar\", \"-cf\", layer_tar,\n        \"-C\", str(staging),\n \
-          \       \"models\",\n    ], check=True)\n\n    # crane append: base=ubi9-micro\
+          \ in HF cache layout (snap={snap_hash[:12]})\")\n\n    # Bundle the guardrail\
+          \ models the serving runtime loads alongside the\n    # generator. vllm-omni's\
+          \ Cosmos3 guardrails.py reads nvidia/Cosmos-1.0-\n    # Guardrail (only\
+          \ face_blur_filter/* and blocklist/*, ~130MB of a 17GB\n    # repo) and\
+          \ Qwen/Qwen3Guard-Gen-0.6B. The green entrypoint runs under\n    # HF_HUB_OFFLINE=1,\
+          \ so these must be present in the modelcar's HF cache or\n    # the API\
+          \ server dies at orchestrator init (\"Cannot reach huggingface.co:\n   \
+          \ # offline mode is enabled\"). Matches the Tekton modelcar pipeline's\n\
+          \    # model-repos list (tekton/05-modelcar-pipeline.yaml).\n    from huggingface_hub\
+          \ import snapshot_download\n    hub_cache = staging / \"models\" / \"huggingface\"\
+          \ / \"hub\"\n    guardrail_repos = [\n        (\"nvidia/Cosmos-1.0-Guardrail\"\
+          , [\"face_blur_filter/*\", \"blocklist/*\"]),\n        (\"Qwen/Qwen3Guard-Gen-0.6B\"\
+          , None),\n    ]\n    dl_env_token = os.environ.get(\"HF_TOKEN\")\n    for\
+          \ repo_id, allow in guardrail_repos:\n        print(f\"[package] bundling\
+          \ guardrail repo {repo_id}\"\n              f\"{' (filtered)' if allow else\
+          \ ''}...\")\n        kwargs = {\"repo_id\": repo_id, \"cache_dir\": str(hub_cache)}\n\
+          \        if allow:\n            kwargs[\"allow_patterns\"] = allow\n   \
+          \     if dl_env_token:\n            kwargs[\"token\"] = dl_env_token\n \
+          \       snapshot_download(**kwargs)\n    total_files = sum(1 for _ in (staging\
+          \ / \"models\").rglob(\"*\") if _.is_file())\n    print(f\"[package] modelcar\
+          \ now has {total_files} files total \"\n          f\"(Cosmos3-Edge + guardrails)\"\
+          )\n\n    with tempfile.NamedTemporaryFile(suffix=\".tar\", delete=False)\
+          \ as tmp:\n        layer_tar = tmp.name\n\n    subprocess.run([\n      \
+          \  \"tar\", \"-cf\", layer_tar,\n        \"-C\", str(staging),\n       \
+          \ \"models\",\n    ], check=True)\n\n    # crane append: base=ubi9-micro\
           \ (arm64 -- Thor is Jetson aarch64).\n    # crane defaults to amd64 when\
           \ resolving a multi-arch base, which produces\n    # an x86_64 image that\
           \ fails with \"Exec format error\" on Thor. Pinning to\n    # linux/arm64\
@@ -973,6 +995,9 @@ deploymentSpec:
           : image_ref_by_digest, \"tag\": image_ref, \"digest\": digest}\n    (out_dir\
           \ / \"image_ref.json\").write_text(json.dumps(meta))\n    return image_ref_by_digest\n\
           \n"
+        env:
+        - name: HF_HUB_DISABLE_XET
+          value: '1'
         image: python:3.12-slim
     exec-sign-modelcar:
       container:
@@ -1285,6 +1310,16 @@ platforms:
             secretNameParameter:
               runtimeValue:
                 constant: github-token
+        exec-package-modelcar:
+          secretAsEnv:
+          - keyToEnv:
+            - envVar: HF_TOKEN
+              secretKey: HF_TOKEN
+            optional: false
+            secretName: hf-credentials
+            secretNameParameter:
+              runtimeValue:
+                constant: hf-credentials
         exec-sign-modelcar:
           secretAsVolume:
           - mountPath: /etc/cosign

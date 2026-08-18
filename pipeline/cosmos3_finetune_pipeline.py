@@ -747,7 +747,7 @@ def gate2_dream_comparison(
 # ---------------------------------------------------------------------------
 @dsl.component(
     base_image="python:3.12-slim",
-    packages_to_install=[],
+    packages_to_install=["huggingface-hub==0.36.2"],
 )
 def package_modelcar(
     checkpoint:    dsl.Input[dsl.Model],
@@ -838,6 +838,34 @@ def package_modelcar(
     (refs_dir / "main").write_text(snap_hash)
 
     print(f"[package] staged {sum(1 for _ in snap_dir.rglob('*'))} files in HF cache layout (snap={snap_hash[:12]})")
+
+    # Bundle the guardrail models the serving runtime loads alongside the
+    # generator. vllm-omni's Cosmos3 guardrails.py reads nvidia/Cosmos-1.0-
+    # Guardrail (only face_blur_filter/* and blocklist/*, ~130MB of a 17GB
+    # repo) and Qwen/Qwen3Guard-Gen-0.6B. The green entrypoint runs under
+    # HF_HUB_OFFLINE=1, so these must be present in the modelcar's HF cache or
+    # the API server dies at orchestrator init ("Cannot reach huggingface.co:
+    # offline mode is enabled"). Matches the Tekton modelcar pipeline's
+    # model-repos list (tekton/05-modelcar-pipeline.yaml).
+    from huggingface_hub import snapshot_download
+    hub_cache = staging / "models" / "huggingface" / "hub"
+    guardrail_repos = [
+        ("nvidia/Cosmos-1.0-Guardrail", ["face_blur_filter/*", "blocklist/*"]),
+        ("Qwen/Qwen3Guard-Gen-0.6B", None),
+    ]
+    dl_env_token = os.environ.get("HF_TOKEN")
+    for repo_id, allow in guardrail_repos:
+        print(f"[package] bundling guardrail repo {repo_id}"
+              f"{' (filtered)' if allow else ''}...")
+        kwargs = {"repo_id": repo_id, "cache_dir": str(hub_cache)}
+        if allow:
+            kwargs["allow_patterns"] = allow
+        if dl_env_token:
+            kwargs["token"] = dl_env_token
+        snapshot_download(**kwargs)
+    total_files = sum(1 for _ in (staging / "models").rglob("*") if _.is_file())
+    print(f"[package] modelcar now has {total_files} files total "
+          f"(Cosmos3-Edge + guardrails)")
 
     with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as tmp:
         layer_tar = tmp.name
@@ -1192,6 +1220,11 @@ def cosmos3_finetune_pipeline(
         image_name    = image_name,
         model_version = model_version,
     )
+    # HF_TOKEN for authenticated guardrail-repo downloads; disable Xet (no
+    # hf_xet package in the slim base) so plain HTTPS is used.
+    use_secret_as_env(package_task, secret_name="hf-credentials",
+                      secret_key_to_env={"HF_TOKEN": "HF_TOKEN"})
+    package_task.set_env_variable("HF_HUB_DISABLE_XET", "1")
 
     sign_task = sign_modelcar(
         image_ref_artifact = package_task.outputs["image_ref_out"],
