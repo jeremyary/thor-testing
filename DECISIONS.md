@@ -628,3 +628,92 @@ diffusion models including NVIDIA's own Nano/Super).
 
 **Files changed:** `pipeline/cosmos3_finetune_pipeline.py`, `gitops/vllm-cosmos3/
 deployment-green.yaml`, `gitops/vllm-cosmos3/entrypoint-configmap.yaml`, `DECISIONS.md`.
+
+## D034: vast.ai 500-iter export dropped action modules — grafted back; 256×256 resolution fix; pinned demo dreams.
+
+**Date:** 2026-08-18
+
+**Context:** The "real improvement" asset (D032/vast.ai README) — a proper
+500-iteration Vision SFT on rented 8×H100 — finished and was verified on the box
+(exit 0, loss 2.69→1.43, moe_gen weight delta max ~4-9e-3, much larger than the
+earlier 100-step Thor run). We pulled the tuned `diffusers_out` back (8.6G),
+destroyed the box, packaged it as a signed modelcar, and deployed to Thor green
+to generate the v1-vs-v2 "dream before deploy" comparison. Several real problems
+surfaced in that last mile.
+
+**D034-A: The vast.ai Vision-SFT export silently dropped the 5 action modules.**
+
+The dreamer's Forward Dynamics call (`action_mode=forward_dynamics`) returned
+HTTP 500: *"Cosmos3 action generation was requested, but the transformer was
+initialized without action modules. Check that the checkpoint config enables
+action_gen and includes action weights."* Root cause: the vast.ai
+`export_model → convert_model_to_diffusers` produced a transformer with
+`action_gen: False` and **zero** `action_*` tensors (544 tensors), whereas the
+base `nvidia/Cosmos3-Edge` has `action_gen: True` and 5 action tensors (549
+total): `action_modality_embed`, `action_proj_in.{bias,fc}.weight`,
+`action_proj_out.{bias,fc}.weight` (all BF16, ~16.9MB combined). This is an
+export/convert regression, **not** inherent to Vision SFT — the earlier Thor
+100-step run (D033) preserved all 549 tensors. Vision SFT only trains 5
+generation-pathway groups (moe_gen/time_embedder/vae2llm/llm2vae/k_norm; D032-A)
+and never touches the action modules, so the untrained action weights are
+identical to base and safe to restore.
+
+**D034-B: Grafted the base action modules back into the tuned checkpoint.**
+
+Rather than re-export or re-train, we spliced the 5 base `action_*` tensors into
+the tuned transformer's shard-2 (stdlib safetensors surgery: parse header +
+data, append tensors, rewrite the index with corrected offsets + total_size, set
+`action_gen: True`). Result verified: **549 tensors, `total_size` byte-for-byte
+equal to base (6739314048)**, offsets contiguous, all action tensors load finite
+via the real safetensors lib in-pod, and the Vision-SFT `moe_gen` improvements
+are intact. Repackaged as signed modelcar `sha256:69da94f2…` (Rekor tlog idx 21),
+snapshot `bfaf37f2…`. The grafted v2 then generated coherent Forward Dynamics
+rollouts (142KB MP4 in ~2.6s) — action capability restored, tuning preserved.
+
+**D034-C: Dreams must be generated at 256×256, not the dreamer's 320×192 default.**
+
+The first v2 dream (dreamer default `size=320x192`) was visibly degraded — the
+gripper smeared into an incoherent black blob mid-rollout and the manipulated
+object dissolved. Regenerating the identical request at **256×256** (matching the
+square BridgeData2 conditioning frame) produced a clean, temporally-coherent
+rollout. The forced 320×192 aspect on a square frame was the culprit, not the
+graft or the tune. Any live dream generation for the demo must use 256×256.
+
+**D034-D: Base-vs-v2 comparison is generated deterministically (fixed seed).**
+
+The dreamer randomizes seed per-run (`time % 999999`), which makes any two dreams
+differ partly by noise. For a defensible comparison we pin **seed=42** and hold
+frame (pick_place), action chunk (the `good` 16-step trajectory), size (256×256),
+steps (20), guidance (1.0), flow_shift (3.0) constant — only the **model** varies:
+base modelcar `5c990c93…` (snapshot `2a00e87e…`) vs grafted-v2 `69da94f2…`. Both
+snapshots are staged side-by-side on Thor's hostPath
+(`/var/lib/models/.../models--nvidia--Cosmos3-Edge/snapshots/`) sharing the same
+guardrail repos, so a base⇄v2 swap needs no re-pull. Reproduction script:
+`gen_dream_fixed.py`.
+
+**D034-E: Demo dreams are pinned + immutable; buttons play them deterministically.**
+
+The dashboard's Dream v1/v2 buttons previously triggered a live GPU dreamer run
+(random seed, 320×192, ~min-scale wait). For a short, deterministic internal
+recording we pin the curated pair at
+`/var/lib/dreams/zzz-showcase-cosmos3-edge-v{1,2}.mp4` on Thor: `chattr +i`
+(immutable — survives the dashboard's Clear-Data `unlink()`, which is wrapped in
+try/except), and named `zzz-*` so they always win `_dreams()`'s sorted `[-1]`
+pick even after future live runs. Buttons now call `playPinnedDream()` (loads the
+pinned file via `/api/dream/<name>`), no live generation. The live path stays
+fully documented and available (DEMO_RUNBOOK § Reproducing the Pinned Dreams).
+
+**Retention:** Thor `/var` at 40% (imageGC HighThreshold 85%, ~443G margin) and
+`imagePullPolicy: IfNotPresent`, so cached modelcars + serving image won't be
+re-pulled or GC-evicted; no config change needed.
+
+**Verified:** grafted v2 serves on Thor green (snapshot `bfaf37f2…`, startup
+complete), Forward Dynamics 200 OK at 256×256; base-vs-v2 pair generated at
+matched params; dashboard reports both pinned files as the v1/v2 picks and serves
+them HTTP 200; files confirmed immutable.
+
+**Files changed:** `gitops/vllm-cosmos3/deployment-green.yaml`, `gitops/flywheel/
+dashboard.yaml`, `DEMO_RUNBOOK.md`, `DECISIONS.md`. Tooling (not committed):
+`gen_dream_fixed.py`, `graft_action.py`, `extract_action.py`,
+`stage_modelcar_v2graft.py` (kept locally in `/tmp` — candidates for the repo if
+we productionize the graft).
