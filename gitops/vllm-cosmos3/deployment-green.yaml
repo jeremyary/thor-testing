@@ -97,6 +97,13 @@ spec:
             - name: scripts
               mountPath: /scripts
               readOnly: true
+            # vllm-omni's diffusion worker returns generated video frames to the
+            # API server through /dev/shm. The default 64MB /dev/shm overflows
+            # for a multi-frame video tensor, killing the worker post-generation
+            # (exitcode=None + leaked shared_memory warnings). Mount a
+            # memory-backed emptyDir so results transfer cleanly.
+            - name: dshm
+              mountPath: /dev/shm
       volumes:
         - name: nvidia-libs
           hostPath:
@@ -107,3 +114,7 @@ spec:
           configMap:
             name: cosmos3-script
             defaultMode: 0755
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
