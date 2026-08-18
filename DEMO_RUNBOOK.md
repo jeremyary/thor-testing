@@ -62,6 +62,9 @@ baseline; the right is after the flywheel's fine-tuning. You see the difference
 **before** it touches a fleet. That's dream-before-deploy."
 
 ### Beat 4 — "And it's tracked" (~30s, optional)
+> New to MLflow? Read **§ MLflow, in plain language** first — it explains what
+> you're showing and how to answer follow-ups. ~5 min, worth it.
+
 Cut to the **RHOAI MLflow** tab → experiment **`cosmos3-edge-wam-flywheel`**.
 Select **`v1-base`** and **`v2-500iter-graft`** → **Compare**.
 
@@ -224,11 +227,15 @@ Click **Dream v2**. Compare side-by-side with v1 (both play instantly — pinned
 
 ### Experiment tracking (optional)
 
+> New to MLflow? Read **§ MLflow, in plain language** first (concepts + talk track
+> + likely-questions), then **§ Experiment Tracking (MLflow)** for the logging how-to.
+
 Cut to **RHOAI MLflow** → experiment `cosmos3-edge-wam-flywheel` → Compare
 `v1-base` vs `v2-500iter-graft`: training loss 2.69→1.43, moe_gen weight-delta,
 dream MP4 attached per run, and the `cosmos3-edge` registered model (v1/v2) tagged
-with the deployed signed modelcar digest — experiment-to-artifact lineage. See
-§ Experiment Tracking (MLflow) for how these runs are logged.
+with the deployed signed modelcar digest — experiment-to-artifact lineage. Use the
+loss line-chart + Compare table (not the Parallel Coordinates plot) — see the
+plain-language section for why.
 
 ---
 
@@ -255,6 +262,68 @@ base⇄v2 swap needs no re-pull.
 > BridgeData2 conditioning frame. The dreamer's default `size=320x192` produces
 > visibly degraded, temporally-incoherent rollouts on these square frames — the
 > pinned pair uses 256×256 for this reason.
+
+---
+
+## MLflow, in plain language (read this before presenting Beat 4)
+
+If you're not steeped in MLOps, here's what you're actually showing — enough to
+narrate it *and* answer the obvious follow-ups.
+
+**What problem MLflow solves.** When you train models, you end up with a pile of
+"I ran this with these settings and got these numbers" — easy to lose, impossible
+to compare later. MLflow is a **lab notebook for model training**: every training
+attempt is recorded so you can compare them and trace which one you actually shipped.
+
+**The four nouns (this is the whole mental model):**
+- **Experiment** — a folder for related attempts. Ours is `cosmos3-edge-wam-flywheel`.
+- **Run** — one training attempt inside that folder. We have two: `v1-base`
+  (the untuned starting point) and `v2-500iter-graft` (after fine-tuning).
+- **Parameters** — the *inputs/settings* you chose (dataset, iterations, GPUs).
+  Fixed before the run. In the UI these are the "Parameters" rows.
+- **Metrics** — the *measured results* (training loss, our stability score).
+  Produced by the run. In the UI these are the "Metrics" rows, and the only
+  things you can chart.
+  (Mnemonic: **parameters = knobs you set; metrics = numbers you got.**)
+- **Artifacts** — files the run produced (here, the dream MP4s).
+- **Model Registry** — a separate catalog of "official" models with versions
+  (`cosmos3-edge` v1, v2). Each version is tagged with the **signed modelcar
+  digest**, which is the exact thing running on Thor — that's the "traceability"
+  claim: the experiment links to the deployed artifact, not just a name.
+
+**Why there are only two runs (and why that shapes the visuals).** Real MLOps
+teams have dozens/hundreds of runs, which is what tools like the *Parallel
+Coordinates Plot* are built for. We deliberately have exactly two (baseline vs
+fine-tuned) to tell one clear before/after story — so use the simple **Compare
+table** and a **single loss line-chart**, not the sweep-oriented plots.
+
+**Why some cells are blank/NaN.** `v1-base` was never trained, so it has no
+training loss, no iteration count, etc. Blank there is *correct* — it's the
+"before" picture. The one number that exists on *both* is `dream_temporal_stability`,
+which is why that's the clean side-by-side comparison.
+
+**The three things worth saying, and what each means:**
+1. *"Training loss dropped 2.69 → 1.43."* Loss = how wrong the model's predictions
+   are during training; lower = it learned the data better. A ~47% drop over 500
+   steps is a real training signal (not a stub).
+2. *"The dreams got ~61% smoother (0.044 → 0.017)."* Our `dream_temporal_stability`
+   metric measures how much consecutive video frames jump around; lower = more
+   temporally coherent. **Honest caveat if asked:** it measures *smoothness, not
+   task success* — we pair it with the eyeball comparison, we don't claim it proves
+   the robot would succeed.
+3. *"Each run traces to a signed, deployed artifact."* The `modelcar_digest` tag is
+   the cryptographically-signed image actually on the device — so this isn't a
+   detached spreadsheet, it's lineage from experiment → registry → what's running.
+
+**Likely questions & honest answers:**
+- *"Is this auto-logged by the pipeline?"* — Not yet. These two runs are a curated
+  backfill for the recording; wiring `mlflow.log_*` into the KFP training pipeline
+  so future runs log automatically is a planned next step.
+- *"Why is v1's run duration 184ms?"* — Because v1 is a *logging* record of the
+  untuned baseline, not a training run; the duration is just how long it took to
+  write the record. The real 500-iter training happened on the 8×H100 box.
+- *"Can I click the model and deploy it?"* — The registry version carries the
+  digest; deployment is the GitOps blue/green flip (Beat 5), not a button here.
 
 ---
 
