@@ -1072,7 +1072,7 @@ data:
                 </div>
                 <div class="dream-controls">
                   <button class="btn btn-blue btn-sm" id="btn-dream-v1"
-                          onclick="controlDreamer('start','cosmos3-edge-v1')">
+                          onclick="playPinnedDream('v1')">
                     &#127775; Dream v1
                   </button>
                   <button class="btn btn-red btn-sm hidden" id="btn-dream-stop"
@@ -1101,7 +1101,7 @@ data:
                 </div>
                 <div class="dream-controls">
                   <button class="btn btn-gold btn-sm" id="btn-dream-v2"
-                          onclick="controlDreamer('start','cosmos3-edge-v2')">
+                          onclick="playPinnedDream('v2')">
                     &#10024; Dream v2
                   </button>
                 </div>
@@ -1384,6 +1384,31 @@ data:
           document.getElementById('dream-smooth-v2').textContent = 'Post fine-tuning rollout';
         }
       };
+    }
+
+    // ---- Pinned showcase dream playback -------------------------------------
+    // The Dream v1/v2 buttons play the pinned, curated comparison pair
+    // (zzz-showcase-cosmos3-edge-v{1,2}.mp4 on Thor's /var/lib/dreams,
+    // immutable) via the same _dreams() [-1] pick the status snapshot uses.
+    // Deterministic: no live GPU dreamer run, same rollout every demo.
+    async function playPinnedDream(ver) {
+      const btnId = ver === 'v2' ? 'btn-dream-v2' : 'btn-dream-v1';
+      setLoading(btnId, true);
+      try {
+        const r = await fetch('/api/status');
+        const s = await r.json();
+        const file = (s.dreams || {})[ver];
+        if (file) {
+          dreamLoaded[ver] = null;   // force reload even if already shown
+          loadDream(ver, file);
+          showToast('Dream ' + ver + ' \u2014 Forward Dynamics rollout',
+                    ver === 'v2' ? 'toast-green' : 'toast-blue');
+        } else {
+          showToast('No ' + ver + ' dream available', '');
+        }
+      } finally {
+        setLoading(btnId, false);
+      }
     }
 
     // ---- Curation log -------------------------------------------------------
