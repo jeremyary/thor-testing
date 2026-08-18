@@ -1108,6 +1108,11 @@ def cosmos3_finetune_pipeline(
     github_repo:    str   = "jeremyary/thor-testing",
 ):
     ingest_task = ingest_episodes()
+    # Disable caching: the ingest output is a small artifact in MinIO that can
+    # be pruned out from under a cached reference (e.g. during storage cleanup),
+    # leaving finetune with an empty episodes artifact ("no dataset found").
+    # It's cheap (just locates the pre-staged PVC dataset), so always re-run.
+    ingest_task.set_caching_options(False)
     # Mount the pre-staged dataset PVC
     mount_pvc(ingest_task,
               pvc_name="bridgedata2-dataset",

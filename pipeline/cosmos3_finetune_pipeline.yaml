@@ -1111,8 +1111,7 @@ root:
         taskInfo:
           name: gate2-dream-comparison
       ingest-episodes:
-        cachingOptions:
-          enableCache: true
+        cachingOptions: {}
         componentRef:
           name: comp-ingest-episodes
         taskInfo:
