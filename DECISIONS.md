@@ -717,3 +717,36 @@ dashboard.yaml`, `DEMO_RUNBOOK.md`, `DECISIONS.md`. Tooling (not committed):
 `gen_dream_fixed.py`, `graft_action.py`, `extract_action.py`,
 `stage_modelcar_v2graft.py` (kept locally in `/tmp` — candidates for the repo if
 we productionize the graft).
+
+## D035: `vla-training` namespace is a naming misnomer (we train a WAM, not a VLA) — deferred rename, accurate naming going forward.
+
+**Date:** 2026-08-18
+
+**Context:** The RHOAI Data Science Project / namespace `vla-training` implies a
+**VLA** (Vision-Language-Action *policy* — image+instruction → action tokens, e.g.
+OpenVLA / π0 / GR00T). What this project actually trains is a **WAM / world model**:
+NVIDIA Cosmos3-Edge (omnimodal Mixture-of-Transformers), fine-tuned via **Vision
+SFT on the generation pathway** (moe_gen/time_embedder/vae2llm/llm2vae/k_norm;
+D032-A) to improve Image-to-Video + Forward Dynamics. It generates *future video*
+from a conditioning frame (+ action chunk), not a policy's action stream. The name
+therefore mis-describes the artifact to exactly the technical audience the demo
+targets.
+
+**Decision:** Do **not** rename the namespace now. `vla-training` is load-bearing —
+it hosts the KFP `cosmos3-edge-finetune` pipeline runs, the manifest-consumer, the
+RHOAI MLflow experiment-tracking scope, and is referenced across the pipeline code
+and gitops. OpenShift has no in-place namespace rename; a correct migration is
+create-new + migrate DS-project/pipeline/MLflow/consumer + update all refs + cut
+over + delete old — real breakage risk, wrong to attempt during demo prep.
+
+Instead: (1) record the debt here; (2) make everything **we create from now on**
+use accurate, demo-facing names — MLflow experiment `cosmos3-edge-wam-flywheel`,
+workbench `cosmos3-wam-tracking`, registered model `cosmos3-edge`. The only thing
+that keeps the legacy `vla-training` label is the infra namespace itself, which is
+not foregrounded in the recording.
+
+**Follow-up (deferred, post-recording):** migrate `vla-training` → an accurate
+name (candidates: `wam-training`, `cosmos3-flywheel`, `physical-ai-training`).
+Tracked as tech debt, not scheduled.
+
+**Files changed:** `DECISIONS.md`.
