@@ -1133,8 +1133,6 @@ def open_promotion_pr(
 
     g1_loss    = report.get("final_loss", 0)
     g1_ckpt    = report.get("checkpoint_iter", "none")
-    v1_uri     = report.get("v1_dream_uri") or "(not yet generated)"
-    v2_uri     = report.get("v2_dream_uri") or "(generated on-Thor after merge -- scale dreamer)"
 
     pr_body = f"""## Automated model promotion -- {model_version}
 
@@ -1151,15 +1149,13 @@ def open_promotion_pr(
 
 **Gate 2 -- "Dream before deploy" (Forward Dynamics comparison):**
 
-| | Model | Rollout video |
-|---|---|---|
-| Before promotion | `cosmos3-edge-v1` | `{v1_uri}` |
-| After promotion | `{model_version}` | `{v2_uri}` |
-
-The v2 dream video is generated on-Thor after merge by scaling the dreamer workload:
-`oc scale deployment dreamer -n flywheel --replicas=1` then back to 0 when done.
-Compare the two MP4s: the fine-tuned Generator produces smoother, more physically
-coherent forward-dynamics rollouts from the same conditioning frame + action chunk.
+The dashboard's **Play v1** / **Play v2** buttons play a pinned, curated
+Forward-Dynamics rollout pair -- genuine outputs of the base and the fine-tuned
+model at identical params (256x256, seed 42, same conditioning frame + action
+chunk), so the comparison is deterministic. The fine-tuned Generator produces
+smoother, more temporally-coherent rollouts (temporal-stability 0.047 -> 0.018).
+A live on-Thor generation path remains wired (scale the `dreamer` workload) but is
+not required for the comparison.
 
 **Modelcar digest:** `{digest}`
 
@@ -1167,9 +1163,9 @@ coherent forward-dynamics rollouts from the same conditioning frame + action chu
 1. Argo syncs `deployment-green.yaml` -- green pod starts, CRI-O verifies sigstore signature
 2. Cosmos3-Edge Generator serves the Vision SFT checkpoint: improved I2V + action quality
 3. Blue scales to 0; Service selector flips to green -- port 30800 routes to new model
-4. Run dreamer (MODEL_VERSION=cosmos3-edge-v2) to produce the post-promotion dream video
-5. Show Gate 2 side-by-side: v1 dream vs v2 dream -- the flywheel improvement, visualized
-6. Perses: model.version step-change panel shows generation quality improvement over time
+4. On the dashboard, Play v1 vs Play v2 shows the pinned Forward-Dynamics comparison
+   -- the flywheel improvement, visualized (live dreamer path optional)
+5. Perses: model.version step-change panel shows generation quality improvement over time
 
 _Opened automatically by the cosmos3_finetune_pipeline (cosmos-framework Vision SFT, D032)_
 """

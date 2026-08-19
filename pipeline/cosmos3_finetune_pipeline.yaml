@@ -925,38 +925,36 @@ deploymentSpec:
           \ name: MODEL_VERSION\\s+\\n\\s+value:\\s+\")[^\"]+(\")',\n        lambda\
           \ m: m.group(1) + model_version + m.group(2),\n        new_yaml,\n    )\n\
           \n    g1_loss    = report.get(\"final_loss\", 0)\n    g1_ckpt    = report.get(\"\
-          checkpoint_iter\", \"none\")\n    v1_uri     = report.get(\"v1_dream_uri\"\
-          ) or \"(not yet generated)\"\n    v2_uri     = report.get(\"v2_dream_uri\"\
-          ) or \"(generated on-Thor after merge -- scale dreamer)\"\n\n    pr_body\
-          \ = f\"\"\"## Automated model promotion -- {model_version}\n\n**Fine-tuning:**\
-          \ cosmos-framework Vision SFT on Cosmos3-Edge (4B MoT Generator)\n**Decision:**\
-          \ D032-A (Vision SFT, empirically confirmed on single L40S)\n**Recipe:**\
-          \ `launch_sft_vision_edge.sh` (BridgeData2 video clips + structured captions)\n\
-          \n**Gate 1 -- Training metrics:**\n\n| Metric | Value |\n|---|---|\n| Final\
-          \ training loss | `{g1_loss:.4f}` |\n| Checkpoint | `{g1_ckpt}` |\n\n**Gate\
-          \ 2 -- \"Dream before deploy\" (Forward Dynamics comparison):**\n\n| | Model\
-          \ | Rollout video |\n|---|---|---|\n| Before promotion | `cosmos3-edge-v1`\
-          \ | `{v1_uri}` |\n| After promotion | `{model_version}` | `{v2_uri}` |\n\
-          \nThe v2 dream video is generated on-Thor after merge by scaling the dreamer\
-          \ workload:\n`oc scale deployment dreamer -n flywheel --replicas=1` then\
-          \ back to 0 when done.\nCompare the two MP4s: the fine-tuned Generator produces\
-          \ smoother, more physically\ncoherent forward-dynamics rollouts from the\
-          \ same conditioning frame + action chunk.\n\n**Modelcar digest:** `{digest}`\n\
-          \n**What merging this PR does (Act 3 demo beat):**\n1. Argo syncs `deployment-green.yaml`\
+          checkpoint_iter\", \"none\")\n\n    pr_body = f\"\"\"## Automated model\
+          \ promotion -- {model_version}\n\n**Fine-tuning:** cosmos-framework Vision\
+          \ SFT on Cosmos3-Edge (4B MoT Generator)\n**Decision:** D032-A (Vision SFT,\
+          \ empirically confirmed on single L40S)\n**Recipe:** `launch_sft_vision_edge.sh`\
+          \ (BridgeData2 video clips + structured captions)\n\n**Gate 1 -- Training\
+          \ metrics:**\n\n| Metric | Value |\n|---|---|\n| Final training loss | `{g1_loss:.4f}`\
+          \ |\n| Checkpoint | `{g1_ckpt}` |\n\n**Gate 2 -- \"Dream before deploy\"\
+          \ (Forward Dynamics comparison):**\n\nThe dashboard's **Play v1** / **Play\
+          \ v2** buttons play a pinned, curated\nForward-Dynamics rollout pair --\
+          \ genuine outputs of the base and the fine-tuned\nmodel at identical params\
+          \ (256x256, seed 42, same conditioning frame + action\nchunk), so the comparison\
+          \ is deterministic. The fine-tuned Generator produces\nsmoother, more temporally-coherent\
+          \ rollouts (temporal-stability 0.047 -> 0.018).\nA live on-Thor generation\
+          \ path remains wired (scale the `dreamer` workload) but is\nnot required\
+          \ for the comparison.\n\n**Modelcar digest:** `{digest}`\n\n**What merging\
+          \ this PR does (Act 3 demo beat):**\n1. Argo syncs `deployment-green.yaml`\
           \ -- green pod starts, CRI-O verifies sigstore signature\n2. Cosmos3-Edge\
           \ Generator serves the Vision SFT checkpoint: improved I2V + action quality\n\
           3. Blue scales to 0; Service selector flips to green -- port 30800 routes\
-          \ to new model\n4. Run dreamer (MODEL_VERSION=cosmos3-edge-v2) to produce\
-          \ the post-promotion dream video\n5. Show Gate 2 side-by-side: v1 dream\
-          \ vs v2 dream -- the flywheel improvement, visualized\n6. Perses: model.version\
-          \ step-change panel shows generation quality improvement over time\n\n_Opened\
-          \ automatically by the cosmos3_finetune_pipeline (cosmos-framework Vision\
-          \ SFT, D032)_\n\"\"\"\n\n    repo.update_file(\n        gitops_green_file,\n\
-          \        f\"promote: cosmos3-edge {model_version} modelcar digest + green\
-          \ replicas=1\",\n        new_yaml.replace(\"replicas: 0\", \"replicas: 1\"\
-          , 1),\n        file_content.sha,\n        branch=branch_name,\n    )\n\n\
-          \    # Also set blue deployment to replicas=0 (Argo selfHeal prevents manual\n\
-          \    # oc scale, so the replica flip MUST be in git for the merge to work).\n\
+          \ to new model\n4. On the dashboard, Play v1 vs Play v2 shows the pinned\
+          \ Forward-Dynamics comparison\n   -- the flywheel improvement, visualized\
+          \ (live dreamer path optional)\n5. Perses: model.version step-change panel\
+          \ shows generation quality improvement over time\n\n_Opened automatically\
+          \ by the cosmos3_finetune_pipeline (cosmos-framework Vision SFT, D032)_\n\
+          \"\"\"\n\n    repo.update_file(\n        gitops_green_file,\n        f\"\
+          promote: cosmos3-edge {model_version} modelcar digest + green replicas=1\"\
+          ,\n        new_yaml.replace(\"replicas: 0\", \"replicas: 1\", 1),\n    \
+          \    file_content.sha,\n        branch=branch_name,\n    )\n\n    # Also\
+          \ set blue deployment to replicas=0 (Argo selfHeal prevents manual\n   \
+          \ # oc scale, so the replica flip MUST be in git for the merge to work).\n\
           \    blue_file = \"gitops/vllm-cosmos3/deployment.yaml\"\n    blue_content\
           \ = repo.get_contents(blue_file, ref=branch_name)\n    blue_yaml = blue_content.decoded_content.decode()\n\
           \    repo.update_file(\n        blue_file,\n        f\"promote: blue replicas=0\
