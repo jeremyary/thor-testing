@@ -1073,7 +1073,7 @@ data:
                 </div>
                 <div class="dream-controls">
                   <button class="btn btn-blue btn-sm" id="btn-dream-v1"
-                          onclick="playPinnedDream('v1')">
+                          onclick="toggleDream('v1')">
                     &#9654; Play v1
                   </button>
                   <!-- Stop button only appears if the live dreamer is running
@@ -1104,7 +1104,7 @@ data:
                 </div>
                 <div class="dream-controls">
                   <button class="btn btn-gold btn-sm" id="btn-dream-v2"
-                          onclick="playPinnedDream('v2')">
+                          onclick="toggleDream('v2')">
                     &#9654; Play v2
                   </button>
                 </div>
@@ -1224,11 +1224,13 @@ data:
         const vid  = document.getElementById('dream-' + ver);
         const ph   = document.getElementById('dream-ph-' + ver);
         const wrap = document.getElementById('dream-wrap-' + ver);
+        vid.pause();
         vid.removeAttribute('src');
         vid.classList.remove('loaded');
         ph.classList.remove('hidden');
         wrap.classList.remove('has-video');
         dreamLoaded[ver] = null;
+        setDreamButton(ver, false);
       }
       // Reset log
       document.getElementById('log-body').innerHTML =
@@ -1377,10 +1379,47 @@ data:
     // ---- Dream loader -------------------------------------------------------
     const dreamLoaded = {v1: null, v2: null};
 
+    // Play<->Stop toggle button state. v1 is blue, v2 is gold when idle;
+    // both turn red ("Stop") while their rollout is playing.
+    function setDreamButton(ver, playing) {
+      const btn  = document.getElementById('btn-dream-' + ver);
+      if (!btn) return;
+      const idleCls = ver === 'v2' ? 'btn-gold' : 'btn-blue';
+      btn.classList.remove('btn-blue', 'btn-gold', 'btn-red');
+      if (playing) {
+        btn.classList.add('btn-red');
+        btn.innerHTML = '\u25A0 Stop ' + ver;
+      } else {
+        btn.classList.add(idleCls);
+        btn.innerHTML = '\u25B6 Play ' + ver;
+      }
+    }
+
+    // Attach play/pause listeners once so the button always reflects the real
+    // <video> state (covers loop, programmatic pause, Clear, etc.).
+    function wireDreamVideo(ver) {
+      const vid = document.getElementById('dream-' + ver);
+      if (vid._wired) return;
+      vid._wired = true;
+      vid.addEventListener('play',  () => setDreamButton(ver, true));
+      vid.addEventListener('pause', () => setDreamButton(ver, false));
+    }
+
+    // Toggle: play from the start if stopped, otherwise stop.
+    function toggleDream(ver) {
+      const vid = document.getElementById('dream-' + ver);
+      if (vid && !vid.paused && vid.classList.contains('loaded')) {
+        vid.pause();                 // -> 'pause' event flips button to Play
+      } else {
+        playPinnedDream(ver);        // load (if needed) + play from frame 0
+      }
+    }
+
     function loadDream(ver, file, autoPlay) {
       const vid  = document.getElementById('dream-' + ver);
       const ph   = document.getElementById('dream-ph-' + ver);
       const wrap = document.getElementById('dream-wrap-' + ver);
+      wireDreamVideo(ver);
       // Reload only if the source changed; otherwise just replay from start.
       if (dreamLoaded[ver] !== file) {
         dreamLoaded[ver] = file;
