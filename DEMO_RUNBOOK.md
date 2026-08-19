@@ -53,13 +53,16 @@ caught and never leaves. ~30% are deliberately injected failures; the curator
 catches them." Click **Stop Flywheel**.
 
 ### Beat 3 — "Dream before deploy" — the money shot (~90s)
-Scroll to **Dream Before Deploy**. Click **Dream v1**, then **Dream v2** — both
+Scroll to **Forward Dynamics** (panel 2). Press **Play v1**, then **Play v2** — both
 play **instantly** (pinned pair, same 256×256 conditioning frame, same seed,
 same 16-step action trajectory — only the model differs).
 "Same frame, same action trajectory, different model. Forward Dynamics — the
 world model computes what the arm *would* do, no physics engine. The left is the
-baseline; the right is after the flywheel's fine-tuning. You see the difference
-**before** it touches a fleet. That's dream-before-deploy."
+baseline; the right is after the flywheel's fine-tuning. Watch the early motion —
+after tuning around how the arm movement unfolds, the prediction holds together
+through the point where the arm grasps the object; it loosens toward the end of
+the rollout as prediction uncertainty compounds. You see the difference **before**
+it touches a fleet. That's dream-before-deploy."
 
 ### Beat 4 — "And it's tracked" (~30s, optional)
 > New to MLflow? Read **§ MLflow, in plain language** first — it explains what
@@ -167,8 +170,8 @@ This is all dashboard. Click **Start Flywheel**.
 
 **What happens on screen:**
 - The flywheel-running indicator lights up green
-- Scene/Frame panel populates with a real 256×256 BridgeData2 robot image (WidowX arm on a tabletop)
-- Generator Output panel shows:
+- Input Frame panel populates with a real 256×256 BridgeData2 robot image (WidowX arm on a tabletop)
+- Panel 1 (Generate plan video + action policy) shows:
   - A **looping video clip** — the model imagining the scene in motion from the conditioning frame
   - **Image→Video** stats: status, clip size (~200KB), latency (~2.5s)
   - **Action Policy** stats: status, chunk size (16 joint-position steps), smoothness score
@@ -192,17 +195,17 @@ Click **Stop Flywheel** on the dashboard.
 
 ---
 
-## Part 3 — Dream Before Deploy (~3 min)
+## Part 3 — Forward Dynamics / Dream Before Deploy (~3 min)
 
-Back on the dashboard. Scroll to the **Dream Before Deploy** panel.
+Back on the dashboard. Scroll to the **Forward Dynamics** panel (panel 2).
 
 "Before we promote the fine-tuned model, let's see what the current model predicts. Forward Dynamics takes a real robot image and a real action trajectory — 16 steps of joint positions — and the world model computes what would happen. No physics engine. Pure learned understanding."
 
-Click **Dream v1**. The rollout video appears **instantly** — the buttons play
+Press **Play v1**. The rollout video plays **on click** — the buttons play
 the pinned, curated comparison pair (see § Reproducing the Pinned Dreams), not a
-live GPU run. If you want a genuinely-live rollout instead, scale the dreamer at
-256×256 (see the resolution note below) — but for a clean recording, pinned is
-deterministic.
+live GPU run. (Play toggles to **Stop** while a rollout is playing.) If you want a
+genuinely-live rollout instead, scale the dreamer at 256×256 (see the resolution
+note below) — but for a clean recording, pinned is deterministic.
 
 "That's the baseline. Now let's promote the new model and see if the flywheel improved it."
 
@@ -221,7 +224,7 @@ Wait for the model badge on the dashboard to flip to `cosmos3-edge-v2-500iter-gr
 (~5 min for model load — **narrate or fast-forward in recording**; this is the
 single longest wait in the live path, which is why the Short Cut skips it).
 
-Click **Dream v2**. Compare side-by-side with v1 (both play instantly — pinned pair).
+Press **Play v2**. Compare side-by-side with v1 (pinned pair).
 
 "Same frame, same action trajectory. Different model. The flywheel trained the Generator on robot manipulation data, and the prediction changed. This is what 'dream before deploy' means — you see the difference before it touches a fleet."
 
@@ -241,7 +244,7 @@ plain-language section for why.
 
 ## Reproducing the Pinned Dreams
 
-The dashboard's **Dream v1/v2** buttons play a pinned, curated pair on Thor at
+The dashboard's **Play v1/v2** buttons play a pinned, curated pair on Thor at
 `/var/lib/dreams/zzz-showcase-cosmos3-edge-v{1,2}.mp4` (immutable via `chattr +i`,
 sort-last names so they always win the dashboard's `_dreams()` pick, and survive
 Clear Data + pod restarts). Both are genuine model outputs at **256×256, seed 42**,
@@ -316,6 +319,17 @@ which is why that's the clean side-by-side comparison.
    detached spreadsheet, it's lineage from experiment → registry → what's running.
 
 **Likely questions & honest answers:**
+- *"Why do the videos look rough / smeary, especially toward the end?"* — These are
+  4-billion-parameter generative predictions running on a **single edge device**
+  (Jetson Thor), not a render farm — so they're impressionistic by nature, and the
+  rollout loosens in its back third as prediction uncertainty compounds over the
+  16-step horizon. That's expected, not a defect. The demo's claim isn't
+  photorealism — it's the **flywheel mechanism** and the **v1→v2 delta**: same
+  frame, same action plan, only the model changed, and the fine-tuned version stays
+  coherent longer and moves more smoothly (temporal-stability 0.047 → 0.018). The
+  first-stage Generator Output clips are live per-episode generation on-device, so
+  they're rough too — the signal there is coherent-vs-garbage, which is exactly what
+  the on-device curator scores.
 - *"Is this auto-logged by the pipeline?"* — Not yet. These two runs are a curated
   backfill for the recording; wiring `mlflow.log_*` into the KFP training pipeline
   so future runs log automatically is a planned next step.
@@ -389,10 +403,10 @@ ssh thor "KUBECONFIG=/var/lib/microshift/resources/kubeadmin/kubeconfig \
 | Cosmos3-Edge not responding | Delete the vLLM pod, wait 5 min for reload |
 | Dashboard not updating | Delete dashboard pod: `oc delete pod -n flywheel -l app=dashboard` |
 | Generated video not showing | Verify `latest_generated.mp4` exists in robot-sim pod |
-| Dream button does nothing | Check dreamer logs; GPU may be contended with vLLM |
+| Play button does nothing | Pinned files missing? Check `/var/lib/dreams/zzz-showcase-*.mp4`. (Live path only: check dreamer logs; GPU may be contended with vLLM) |
 | Flywheel buttons unresponsive | Refresh the dashboard page; check dashboard pod logs |
 | Pipeline not triggering | Check manifest-consumer logs; verify TRAINING_PIPELINE_ID is set |
 | No GPU node for training | L40S machinepool must exist with autoscaler enabled |
 | v1/v2 dreams look similar | Use the pinned pair (default); it's from the real 500-iter run. Do NOT live-generate at 320×192 — that degrades quality. See § Reproducing the Pinned Dreams |
-| Dream buttons play nothing | Pinned files must exist + be immutable on Thor `/var/lib/dreams/zzz-showcase-*.mp4`; dashboard reads them via `_dreams()`. Restart dashboard pod if the configmap changed |
+| Play buttons play nothing | Pinned files must exist + be immutable on Thor `/var/lib/dreams/zzz-showcase-*.mp4`; dashboard reads them via `_dreams()`. Restart dashboard pod if the configmap changed |
 | Catastrophic failure | Switch to pre-recorded video |
