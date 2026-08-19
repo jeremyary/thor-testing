@@ -31,7 +31,7 @@ Predicted Video → [Cosmos3-Edge Reasoner] → Verification ("Did it work?")
 ## Quick Start
 
 ```bash
-# 1. Start Cosmos3-Edge server (see VLLM_ON_THOR.md for full setup)
+# 1. Start Cosmos3-Edge server (see DEPLOYMENT_GUIDE.md for full setup)
 # 2. Run the demo
 python3 action_preview.py --image workspace.jpg --action "pick up the red block"
 ```

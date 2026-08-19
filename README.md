@@ -52,56 +52,13 @@ as step changes in a dashboard.
 - AMQ Streams (Kafka), MinIO (object storage)
 - Cluster Observability Operator (Tempo, Perses)
 
-## Repository layout
-
-```
-derived-image/    # Containerfile + configs for the bootc OS image
-  config/         #   policy.json, cosign pubkey, registries.d, otel, microshift
-  greenboot/      #   health-check scripts (microshift, vllm_gpu)
-  manifests/      #   day-0 MicroShift manifests
-gitops/           # Argo CD-delivered workloads
-  vllm-cosmos3/   #   Cosmos3-Edge deployment (modelcar initContainer), service
-  flywheel/       #   robot-sim, curator, sync-agent, edge-kafka, dashboard
-  edge-workloads/ #   smoke test, namespace
-  observability/  #   Perses instance, Tempo datasource, dashboard
-modelcar/         # Containerfile + stage script for the Cosmos3-Edge modelcar
-tekton/           # OS-image + modelcar build/sign pipelines and tasks
-pipeline/         # KFP/DSP Cosmos3 fine-tune pipeline (Phase 4)
-action-preview/   # Early PoC: text->video generation demo
-dream-comparison/ # Canonical "dream before deploy" v1-vs-v2 demo assets
-vast-ai/          # Off-cluster 8xH100 Vision SFT recipe (produces the v2 asset)
-assets/           # Architecture diagram + demo conditioning frames
-```
-
-## Status
-
-**Phase: demo-ready.** Operational through Phase 5 (trust plane); the full Tekton
-build+sign pipeline is validated end to end.
-
-- **Working:** derived bootc image builds/signs and boots on the Thor; MicroShift
-  + all workloads come up; Cosmos3-Edge inference serves under GPU; flightctl
-  enrollment, ACM registration, and Argo CD sync are live; edge Kafka + sync-agent
-  run; OTel exports to hub Tempo; Perses dashboards render; both OS image and
-  modelcar are cosign-signed with Rekor entries; signature policy enforces
-  `sigstoreSigned` for both bootc and CRI-O pulls.
-- **Deferred:** Phase 4 (training pipeline) pending an L40S GPU pool on OSD; a
-  JetPack/base-image bump awaiting the sidecar team's next tag.
-
-See [`PROJECT_STATUS.md`](PROJECT_STATUS.md) for the detailed current-state report.
-
 ## Documentation
 
 | Document | What it covers |
 |----------|----------------|
-| [`PROJECT-BRIEF.md`](PROJECT-BRIEF.md) | Full architecture vision, phased build plan, demo storyboard |
-| [`PROJECT_STATUS.md`](PROJECT_STATUS.md) | Detailed current state, what works, gotchas |
 | [`DEPLOYMENT_GUIDE.md`](DEPLOYMENT_GUIDE.md) | Step-by-step reproducible setup, all phases |
-| [`DECISIONS.md`](DECISIONS.md) | Decision log (D001+) with rationale — raw material for the write-up |
+| [`DECISIONS.md`](DECISIONS.md) | Decision log (D001+) with rationale |
 | [`DEMO_RUNBOOK.md`](DEMO_RUNBOOK.md) | Demo script: short cut (~4-5 min) + full live demo (~10-12 min) |
-| [`PHASE0-FINDINGS.md`](PHASE0-FINDINGS.md) | Initial Thor audit (OS, GPU, networking, storage) |
-| [`UNDERSTANDING_THE_BUILD.md`](UNDERSTANDING_THE_BUILD.md) | Deep-dive on the bootc + sidecar build chain |
-| [`VLLM_ON_THOR.md`](VLLM_ON_THOR.md) | Full path from boxed Thor to serving inference |
-| [`VLLM_OMNI_UPGRADE_RESEARCH.md`](VLLM_OMNI_UPGRADE_RESEARCH.md) | vLLM-Omni upgrade research (proposal) |
 
 ## Getting started
 

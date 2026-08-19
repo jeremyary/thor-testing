@@ -22,3 +22,11 @@ bootc-and-image-thoughts.md
 download.txt
 ghostty
 vast-ai/HANDOFF.md
+
+# Internal working docs (kept local, not shared)
+PROJECT-BRIEF.md
+PROJECT_STATUS.md
+PHASE0-FINDINGS.md
+UNDERSTANDING_THE_BUILD.md
+VLLM_ON_THOR.md
+VLLM_OMNI_UPGRADE_RESEARCH.md
