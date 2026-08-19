@@ -624,19 +624,32 @@ def finetune_cosmos3(
             print(f"[finetune]   copied {item.name} {'(dir)' if item.is_dir() else f'({item.stat().st_size} bytes)'}")
         print(f"[finetune] {sum(1 for _ in export_path.rglob('*'))} files in artifact")
 
-        # Parse final loss -- prefer captured stdout, fall back to the
-        # launcher's log file under $OUTPUT_ROOT/logs/.
+        # Parse final loss -- prefer captured stdout, fall back to ANY *.log the
+        # launcher wrote under $OUTPUT_ROOT (recursive: the launcher's own log
+        # lands under a logs/ subdir whose exact path/name has drifted between
+        # cosmos-framework versions -- e.g. logs/vision_sft_edge_sft.log). The
+        # loss lines are formatted "Loss: <float>" (same format vast-ai's
+        # verify_quality.sh greps). Collect ALL matches across sources so we can
+        # take the true last value; do NOT silently leave final_loss=0.0.
+        output_root = scratch / "outputs" / "train"
         loss_sources = [train_stdout]
-        log_dir = scratch / "outputs" / "train" / "logs"
-        loss_sources += [p.read_text() for p in log_dir.glob("*.log")] if log_dir.exists() else []
+        loss_sources += [
+            p.read_text(errors="ignore")
+            for p in output_root.rglob("*.log")
+            if p.is_file()
+        ]
+        loss_values: list[float] = []
         for text in loss_sources:
-            for line in reversed(text.splitlines()):
-                m = re.search(r"Loss:\s*([\d.]+)", line)
-                if m:
-                    final_loss = float(m.group(1))
-                    break
-            if final_loss > 0:
-                break
+            loss_values += [float(x) for x in re.findall(r"Loss:\s*([\d.]+)", text)]
+        if loss_values:
+            final_loss = loss_values[-1]   # last logged step = final training loss
+        else:
+            # Real training ran (we have a checkpoint) but no loss line parsed --
+            # surface it loudly instead of reporting a bogus 0.0000 in the PR.
+            print("[finetune] WARNING: training produced a checkpoint but no "
+                  "'Loss: <n>' line was found in stdout or any "
+                  f"{output_root}/**/*.log -- final_loss will be reported as "
+                  "0.0 (check the launcher log format/path).")
     else:
         print("[finetune] no checkpoint found -- training failed")
         ckpt_iter = "none"

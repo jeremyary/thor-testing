@@ -675,15 +675,27 @@ deploymentSpec:
           \ {'(dir)' if item.is_dir() else f'({item.stat().st_size} bytes)'}\")\n\
           \        print(f\"[finetune] {sum(1 for _ in export_path.rglob('*'))} files\
           \ in artifact\")\n\n        # Parse final loss -- prefer captured stdout,\
-          \ fall back to the\n        # launcher's log file under $OUTPUT_ROOT/logs/.\n\
-          \        loss_sources = [train_stdout]\n        log_dir = scratch / \"outputs\"\
-          \ / \"train\" / \"logs\"\n        loss_sources += [p.read_text() for p in\
-          \ log_dir.glob(\"*.log\")] if log_dir.exists() else []\n        for text\
-          \ in loss_sources:\n            for line in reversed(text.splitlines()):\n\
-          \                m = re.search(r\"Loss:\\s*([\\d.]+)\", line)\n        \
-          \        if m:\n                    final_loss = float(m.group(1))\n   \
-          \                 break\n            if final_loss > 0:\n              \
-          \  break\n    else:\n        print(\"[finetune] no checkpoint found -- training\
+          \ fall back to ANY *.log the\n        # launcher wrote under $OUTPUT_ROOT\
+          \ (recursive: the launcher's own log\n        # lands under a logs/ subdir\
+          \ whose exact path/name has drifted between\n        # cosmos-framework\
+          \ versions -- e.g. logs/vision_sft_edge_sft.log). The\n        # loss lines\
+          \ are formatted \"Loss: <float>\" (same format vast-ai's\n        # verify_quality.sh\
+          \ greps). Collect ALL matches across sources so we can\n        # take the\
+          \ true last value; do NOT silently leave final_loss=0.0.\n        output_root\
+          \ = scratch / \"outputs\" / \"train\"\n        loss_sources = [train_stdout]\n\
+          \        loss_sources += [\n            p.read_text(errors=\"ignore\")\n\
+          \            for p in output_root.rglob(\"*.log\")\n            if p.is_file()\n\
+          \        ]\n        loss_values: list[float] = []\n        for text in loss_sources:\n\
+          \            loss_values += [float(x) for x in re.findall(r\"Loss:\\s*([\\\
+          d.]+)\", text)]\n        if loss_values:\n            final_loss = loss_values[-1]\
+          \   # last logged step = final training loss\n        else:\n          \
+          \  # Real training ran (we have a checkpoint) but no loss line parsed --\n\
+          \            # surface it loudly instead of reporting a bogus 0.0000 in\
+          \ the PR.\n            print(\"[finetune] WARNING: training produced a checkpoint\
+          \ but no \"\n                  \"'Loss: <n>' line was found in stdout or\
+          \ any \"\n                  f\"{output_root}/**/*.log -- final_loss will\
+          \ be reported as \"\n                  \"0.0 (check the launcher log format/path).\"\
+          )\n    else:\n        print(\"[finetune] no checkpoint found -- training\
           \ failed\")\n        ckpt_iter = \"none\"\n        export_path = out_dir\
           \ / \"model\"\n        export_path.mkdir(parents=True, exist_ok=True)\n\n\
           \    # Use the ckpt_iter captured before Step 6a cleanup -- ckpt_ptr itself\
