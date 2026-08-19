@@ -1,9 +1,24 @@
+# Secrets / crypto material
 *.key
 *.csr
 *.srl
+.env
+
+# Vendored / external repos (not part of this repo)
 /nvidia-jetson-sidecar/
 /centos-bootc-tegra/
+
+# Python
 __pycache__/
 *.pyc
-.env
+
+# Local tooling / editor / OS cruft
+.DS_Store
+.claude/
+
+# Ephemeral scratch, handoffs, and private drafts (kept local, not shared)
 pipeline/l40s-sft-probe.yaml
+bootc-and-image-thoughts.md
+download.txt
+ghostty
+vast-ai/HANDOFF.md

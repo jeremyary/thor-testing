@@ -120,7 +120,7 @@ Key learning: the gap between "BuildConfig works" and "Tekton pipeline works" fo
 
 ## Items of Interest
 
-- **Cosign private key** is stored as `cosign-signing-key` Secret in `thor-builds` namespace (also was at `/tmp/thor-signing.key` on the build desktop — may need backup)
+- **Cosign private key** is stored as the `cosign-signing-key` Secret in the `thor-builds` namespace (the authoritative copy). Ensure it is backed up out-of-band; do not leave key material on local disk.
 - **Rekor transparency log** has entries at `https://rekor-server-trusted-artifact-signer.apps.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com`
 - **Thor SSH:** `ssh thor` (10.0.0.42), key-based auth, root sudo
 - **Hub cluster:** `api.g4h4d3j7q1c9f7m.cimo.p1.openshiftapps.com:6443`, user `jary@redhat.com`
