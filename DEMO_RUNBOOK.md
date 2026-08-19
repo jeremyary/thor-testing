@@ -17,101 +17,192 @@ Two ways to run this:
 
 ## Short Cut — Targeted Internal Recording (~4-5 min)
 
-Goal: show internal stakeholders **what the flywheel looks like** — real model
-on real hardware, on-device curation, and the "dream before deploy" v1-vs-v2
-comparison — without the 5-minute live model-load wait. The dream videos are the
-**pre-baked, curated comparison pair** from the real 500-iter Vision SFT run
-(reproduction command below), played instantly by the dashboard buttons. Every
-other thing on screen is live.
+### The story you're telling (read this first)
 
-### Pre-record (2 min)
+> **"An AI robot-brain that improves itself — on a device on my desk, and every
+> step of it governed."**
+>
+> A Jetson Thor runs a real world model. It watches itself work, throws out the
+> bad attempts *on the device*, ships only the good data to the cluster, which
+> retrains the model, signs it, and promotes it back — and you can *see* the model
+> get better before it's ever deployed to a fleet. That's the flywheel.
+>
+> Five beats tell that arc: **(1)** it's real and on the device → **(2)** it
+> curates its own data → **(3)** training produces a measurably better model →
+> **(4)** you can see the improvement *before* deploying → **(5)** every promotion
+> is signed and GitOps-governed.
+>
+> **The one honest shortcut:** real model training takes ~30 minutes and a model
+> hot-swap takes ~5, which nobody wants to watch. So we run the *live* parts live
+> (the model, on-device curation), and for the training step we show the **real
+> artifacts a real run already produced** (the pipeline's PR, the tracked metrics,
+> the before/after prediction videos). Nothing is faked — it's time-compressed.
+
+### Prerequisites — what you need before recording
+
+- **Access:** you can `ssh thor` and you're `oc login`'d to the hub cluster.
+- **Device is in the clean start state** (verify — see next block). It should be
+  serving **v1** (the *baseline* model), flywheel idle, counts at zero.
+- **A real promotion PR to show** — GitHub PR
+  [#3 on jeremyary/thor-testing](https://github.com/jeremyary/thor-testing/pull/3)
+  (a genuine merged `[promote] cosmos3-edge` PR from an earlier real run). You'll
+  show it as the artifact the pipeline produced. Any merged `promote/cosmos3-edge-v2`
+  PR works.
+- **~4-5 minutes** and a screen recorder.
+
+### Setup — verify state and open your tabs (2 min)
+
 ```bash
-# Thor serving the promoted (v2) model
-curl -s http://10.0.0.42:30800/v1/models | python3 -m json.tool   # HTTP 200
-# Dashboard up
-open http://10.0.0.42:30801
+# 1. Confirm the device is serving the BASELINE (v1) model, idle and clean:
+ssh thor 'curl -s http://10.0.0.42:30801/api/status | python3 -m json.tool' \
+  | grep -E 'model_version|flywheel_running|"sent"'
+#   expect: "model_version": "cosmos3-edge-v1", "flywheel_running": false, "sent": 0
+#   If it says v2 or has counts > 0, the device isn't in start state -- see
+#   "Reset to start state" at the end of this section before recording.
 ```
-Do **NOT** hit Clear Data — the pinned dream files are immutable and survive it,
-but skip it to keep the panel populated. Have three tabs ready: dashboard
-(primary), Argo CD (one 20-second cutaway), and the **RHOAI MLflow** experiment
-`cosmos3-edge-wam-flywheel` with `v1-base` + `v2-500iter-graft` pre-selected in
-the Compare view (Beat 4).
 
-### Beat 1 — "It's real, on the device" (~45s)
-Point at the dashboard model badge: **`cosmos3-edge-v2-500iter-graft`**.
-"This is NVIDIA's Cosmos3-Edge — a 4-billion-parameter omnimodal world model —
-running on a Jetson Thor on my desk. Not a cloud endpoint. The whole stack is
-GitOps-delivered; zero inbound connections to the device."
-(Optional 20s Argo cutaway: three apps synced.)
+Open **four browser tabs**, in this left-to-right order (you'll move through them
+in sequence — the demo never jumps around):
 
-### Beat 2 — "The flywheel curates on-device" (~90s)
-Click **Start Flywheel**. Let it run ~4-5 cycles (don't wait for the full 10).
-"Each cycle the model does two things from a real robot frame: generates a
-short Image-to-Video clip, and predicts the next 16 steps of arm joint
-positions. The curator scores both **on the device** — green passes, red is
-caught and never leaves. ~30% are deliberately injected failures; the curator
-catches them." Click **Stop Flywheel**.
+1. **Dashboard** (your main screen): `http://10.0.0.42:30801` — used in Beats 1, 2, 5
+2. **The PR** (Beat 3): the merged promotion PR above
+3. **Experiment tracking (MLflow)** (Beat 4): RHOAI console → **Experiments** →
+   `cosmos3-edge-wam-flywheel`. If you're new to MLflow, read
+   **§ MLflow, in plain language** once — it's the "training results" screen.
+   Pre-select the two runs `v1-base` and `v2-500iter-graft` and click **Compare**.
+4. **Argo CD** (optional — Beat 1 cutaway & Beat 6): the `flywheel-thor` app, Synced.
 
-### Beat 3 — "Dream before deploy" — the money shot (~90s)
-Scroll to **Forward Dynamics** (panel 2). Press **Play v1**, then **Play v2** — both
-play **instantly** (pinned pair, same 256×256 conditioning frame, same seed,
-same 16-step action trajectory — only the model differs).
-"Same frame, same action trajectory, different model. Forward Dynamics — the
-world model computes what the arm *would* do, no physics engine. The left is the
-baseline; the right is after the flywheel's fine-tuning. Watch the early motion —
-after tuning around how the arm movement unfolds, the prediction holds together
-through the point where the arm grasps the object; it loosens toward the end of
-the rollout as prediction uncertainty compounds. You see the difference **before**
-it touches a fleet. That's dream-before-deploy."
+> Leave the dashboard on its default view. Do **not** click **Clear Data** during
+> setup — the before/after prediction videos are pinned and you want them ready.
 
-### Beat 4 — "And it's tracked" (~30s, optional)
-> New to MLflow? Read **§ MLflow, in plain language** first — it explains what
-> you're showing and how to answer follow-ups. ~5 min, worth it.
+---
 
-Cut to the **RHOAI MLflow** tab → experiment **`cosmos3-edge-wam-flywheel`**.
-Select **`v1-base`** and **`v2-500iter-graft`** → **Compare**.
+### Beat 1 — "It's real, and it's on the device" (~45s)
 
-**Point at exactly three things (ignore the rest):**
+**Screen:** Dashboard. Point at the model badge (top): it reads **`cosmos3-edge-v1`**.
+
+> "This is NVIDIA's Cosmos3-Edge — a 4-billion-parameter world model — running on
+> a Jetson Thor sitting on my desk. Not a cloud API. The entire stack was delivered
+> to it by GitOps with zero inbound connections to the device. Right now it's
+> running the **baseline** model — remember that, because we're about to watch the
+> system improve it."
+
+*(Optional 20-sec cutaway to the Argo CD tab: "everything on the device is synced
+from Git — this is the control plane.")*
+
+### Beat 2 — "It curates its own data, on the device" (~90s)
+
+**Screen:** Dashboard. Click **Start Flywheel**. Let it run ~4-5 cycles (you do
+**not** need the full 10 — just enough to see the log fill and the bar move).
+
+> "Watch what each cycle does. From a real robot camera frame, the model does two
+> things: it **generates** a short video of what it thinks happens next, and it
+> **predicts** the arm's next 16 moves. Then a curator scores both — **right here
+> on the device.** Green rows pass; red rows are rejected and *never leave the
+> Thor*. About 30% of these are deliberately broken attempts, and the curator
+> catches them every time. Only the good data earns a trip to the cluster. That's
+> the 'flywheel': the device is generating its own training data and quality-gating
+> it before it ever costs you bandwidth or trust."
+
+Point at the **progress bar** climbing toward the training trigger, then click
+**Stop Flywheel**.
+
+> "When enough good episodes accumulate, it trips a training run automatically."
+
+### Beat 3 — "Training produced a better model" (~45s) — *the honest time-compress*
+
+**Screen:** switch to the **PR** tab.
+
+> "Here's where I'm compressing time. A real training run takes about half an hour
+> on a GPU that scales up from zero — you don't want to watch that. So this is the
+> **actual pull request a real run opened**: it took the curated data, retrained
+> the model, packaged it as a **signed** artifact, and proposed promoting it. Real
+> pipeline, real output — I'm just not making you wait for it live."
+
+Scroll the PR to show the changed model digest / the signed artifact reference.
+
+### Beat 4 — "...and you can measure it" (~45s, optional but strong)
+
+**Screen:** the **MLflow Compare** tab (`v1-base` vs `v2-500iter-graft`).
+
+Point at exactly two numbers:
+1. **Training loss dropped** — `2.69 → 1.43` (~47%). "It actually learned."
+2. **Dream temporal stability** — `0.047` (v1) vs `0.018` (v2), ~61% smoother.
+   "The new model's predictions are measurably more coherent — and in a second
+   you'll *see* that number."
+
+*(Plotting tips + what-the-NaNs-mean are in **§ Reference: the numbers & screens
+behind the beats** just below, if asked.)*
+
+### Beat 5 — "See the improvement *before* you deploy it" — the money shot (~90s)
+
+**Screen:** back to the Dashboard → scroll to **Forward Dynamics** (panel 2).
+Press **Play v1**, then **Play v2**.
+
+> "Same starting frame, same planned motion — the only thing different is the
+> model. This is Forward Dynamics: the world model *imagines* what the arm would do
+> if it executed that plan — no physics engine, no robot moving. On the left, the
+> baseline. On the right, the model the flywheel just produced. Watch the early
+> motion — the fine-tuned version holds together through the grasp and moves more
+> smoothly; that's the 0.047-to-0.018 you just saw, now visible. **This is what
+> 'dream before deploy' means** — you see whether the new model is better *before*
+> it ever touches a real fleet."
+
+### Beat 6 — "...and every promotion is governed" (~30s, optional close)
+
+**Screen:** back on the PR (or Argo) tab.
+
+> "One last thing: none of this is a hand-edit. Promoting that model was merging a
+> pull request — Git is the control plane. Argo syncs it to the device, and before
+> the new model can even load, the device verifies its **cryptographic signature**.
+> A model that isn't signed by our pipeline simply won't run. Self-improving, and
+> governed end to end."
+
+That's the arc. Stop recording.
+
+---
+
+### Reference: the numbers & screens behind the beats
+
+*You don't narrate this — it's here so you can answer follow-ups and set up the
+MLflow tab correctly.*
+
+**MLflow Compare (`v1-base` vs `v2-500iter-graft`) — what to point at:**
 1. **Training loss** — `train_loss_start` **2.69** → `train_loss_end` **1.43**
-   (`train_loss_delta` **1.26**, ~47% drop). "It actually learned."
-2. **Dream temporal stability** — `dream_temporal_stability` **0.044 (v1)** vs
-   **0.017 (v2)** — ~61% smoother frame-to-frame. "The fine-tuned rollout is
-   measurably more coherent — the number matches what you just saw."
-3. **`modelcar_digest`** differs per run (v1 `5c990c93…`, v2 `69da94f2…`) — each
-   is the **actual signed artifact** on Thor. "The experiment traces straight to
-   what's deployed on the device — registered model `cosmos3-edge` v1/v2."
+   (~47% drop). "It learned."
+2. **Dream temporal stability** — **0.047 (v1)** vs **0.018 (v2)**, ~61% smoother.
+   The one metric that compares cleanly across both runs.
+3. **`modelcar_digest`** differs per run (v1 `5c990c93…`, v2 `69da94f2…`) — each is
+   the actual **signed** artifact on Thor; the experiment traces to what's deployed.
 
-For the loss curve on camera: on the **experiment page → Chart view** (or the
-`v2-500iter-graft` run's **Metrics** tab), add a **line chart** with
-Y=`train_loss_window`, X=step — shows the descending 2.6→2.0 curve. This is the
-best on-camera visual ("it learned").
+**Best on-camera loss visual:** experiment → **Chart view** (or the
+`v2-500iter-graft` run's **Metrics** tab) → line chart, Y=`train_loss_window`,
+X=step (descending 2.6→2.0 curve).
 
-> **Avoid the Compare page's "Parallel Coordinates Plot"** for this two-run demo —
-> it's built for large hyperparameter sweeps and renders as a near-empty/confusing
-> chart with only 2 runs (and v1's blank training params make it worse). If you
-> want a plotted stability comparison, use the **Box Plot** or **Scatter Plot** tab
-> with `dream_temporal_stability` (two clearly separated points: 0.044 vs 0.017).
-> Otherwise just use the **Run details / Compare table** below the plots — it shows
-> the two runs side by side cleanly.
+> **Avoid the Compare page's "Parallel Coordinates Plot"** — built for big
+> hyperparameter sweeps; with 2 runs it's near-empty/confusing. Use the **Box/Scatter
+> Plot** with `dream_temporal_stability`, or just the **Compare table**.
 
-> **What the NaNs mean (if asked):** `v1-base` is the *untuned* baseline, so
-> training-only metrics (loss, weight-delta, iterations) are blank/NaN for it —
-> that's correct, not a logging error. The shared metric that compares cleanly is
-> `dream_temporal_stability`. Dream videos are per-run under **Artifacts → dream/**
-> (the Compare view only shows artifacts common to both runs).
+> **What the NaNs mean (if asked):** `v1-base` is the *untuned* baseline, so its
+> training-only metrics (loss, weight-delta, iterations) are blank/NaN — correct,
+> not a logging error. `dream_temporal_stability` is the shared, comparable metric.
 
-### Beat 5 — "And it's governed" (~30s, optional)
-"Promotion is a signed-modelcar + GitOps blue/green flip — merge a PR, Argo
-syncs, CRI-O verifies the sigstore signature before the model ever loads. The
-full live version of that flip is in the long-form demo."
+> **Why the prediction videos are pre-baked:** the v1/v2 rollouts are pinned,
+> deterministic outputs from the *real* base and 500-iter fine-tuned models (256×256,
+> seed 42, same frame + action chunk) — so the recording is fast and identical every
+> time. They're genuine model outputs, not mock-ups; reproduce either with
+> `dream-comparison/gen_dream.py` (§ Reproducing the Pinned Dreams). The fully-live
+> generation path is in the Full Live Demo below.
 
-> **Why pinned for the recording:** the dream pair is pre-generated from the real
-> 500-iter Vision SFT model so the recording is deterministic and fast (no
-> per-run seed variance, no 5-min live model load). They are genuine model
-> outputs. Reproduce either side exactly with `gen_dream_fixed.py` (256×256,
-> seed 42, pick_place frame + action chunk) against the base or grafted-v2
-> deployment — see § Reproducing the Pinned Dreams. The live generation path
-> remains fully available in the Full Live Demo below.
+### Reset to start state (if the device isn't clean before recording)
+
+```bash
+# On the dashboard: click "Clear Data" to zero the episode counts/log.
+# If the model badge shows v2 (not v1), the device is mid/post-promotion --
+# roll it back to the v1 baseline (git revert of the promotion, Argo re-syncs):
+#   see § "Full Live Demo" pre-demo notes, or revert the replica/selector values
+#   in gitops/vllm-cosmos3/ and let Argo sync (blue up, green down, selector blue).
+```
 
 ---
 
@@ -255,9 +346,10 @@ from the `pick_place` BridgeData2 frame + the `good` 16-step action chunk.
   (Vision-SFT `moe_gen` improvements + base action modules grafted back in — see
   DECISIONS.md D034)
 
-To regenerate either side identically: deploy that model to green, then run
-`gen_dream_fixed.py <tag>` on Thor (points at the green clusterIP, forward-dynamics,
-256×256, seed 42). Both snapshots are staged on Thor's hostPath under
+To regenerate either side identically: serve that model, then run
+`dream-comparison/gen_dream.py <tag>` on Thor (points at the cosmos3-edge clusterIP,
+forward-dynamics, 256×256, seed 42, flow_shift 7.0 — see D036). Both snapshots are
+staged on Thor's hostPath under
 `/var/lib/models/huggingface/hub/models--nvidia--Cosmos3-Edge/snapshots/` so a
 base⇄v2 swap needs no re-pull.
 
