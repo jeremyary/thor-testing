@@ -131,17 +131,14 @@ data:
         return len(_jsons(d))
 
     def _latest_episode() -> Optional[dict]:
-        candidates = [(p, "pass") for p in _jsons(EP_CUR)] + \
-                     [(p, "reject") for p in _jsons(EP_REJ)]
-        if not candidates:
-            return None
-        p, _ = max(candidates, key=lambda x: x[0].stat().st_mtime)
-        try:
-            ep = json.loads(p.read_text())
-            ep["_verdict"] = "pass" if p.parent == EP_CUR else "reject"
-            return ep
-        except Exception:
-            return None
+        # Scan curated, SENT, and rejected. `sent/` is essential: the sync-agent
+        # moves passed episodes curated->sent almost immediately, so without it
+        # the "latest" would revert to a stale curated/rejected file the moment
+        # an episode is synced -- making the Input Frame lag/revert while the
+        # Generator Output (same source) had already moved on. Reuses the same
+        # mtime-sorted scan as the curation log so the two never disagree.
+        rows = _episode_log(1)
+        return rows[0] if rows else None
 
     def _episode_log(n: int = 30) -> list[dict]:
         rows = []
