@@ -8,7 +8,7 @@
 
 ## 1. Mission
 
-Build a working, demoable **edge-to-cluster MLOps flywheel for Physical AI**: a Jetson Thor acting as a managed robot-brain edge device, and an OSD cluster acting as the training/promotion/observability hub. The demo is the executable version of the inner/outer-loop + fleet-data-flywheel framing from the Red Hat/Intel humanoid robotics reference architecture paper (Section 6) that Jeremy co-authored — every component here maps to a box in that diagram.
+Build a working, demoable **edge-to-cluster MLOps flywheel for Physical AI**: a Jetson Thor acting as a managed robot-brain edge device, and an OSD cluster acting as the training/promotion/observability hub. The demo is the executable version of the inner/outer-loop + fleet-data-flywheel framing for humanoid robotics.
 
 The story has **two promotion planes and one data plane**, all rooted in Git, all signed:
 
@@ -18,7 +18,7 @@ The story has **two promotion planes and one data plane**, all rooted in Git, al
 
 Plus a **telemetry plane**: OpenTelemetry end to end, with one trace per control-loop tick and every signal stamped with the live model version, so promotions are visible as step changes in Grafana.
 
-Success is a ~15-minute live demo (three acts + stinger, described in §7) and a reference-architecture write-up. This is a lab/demo system for one device, built as if it were a fleet.
+Success is a ~15-minute live demo (three acts + stinger, described in §7) and an architecture write-up. This is a lab/demo system for one device, built as if it were a fleet.
 
 ## 2. Current state (assets you can assume)
 

@@ -6,8 +6,8 @@
 An edge-to-cluster MLOps flywheel for **Physical AI**, built as a working, demoable
 proof of concept. A NVIDIA Jetson AGX Thor acts as a managed robot-brain edge device;
 an OpenShift Dedicated (OSD) cluster on AWS acts as the training, promotion, signing,
-and observability hub. Every component maps to a box in the Red Hat/Intel humanoid
-robotics reference architecture (inner/outer loop + fleet data flywheel).
+and observability hub. It implements the inner/outer-loop + fleet-data-flywheel
+pattern for humanoid robotics.
 
 ![Physical AI Edge Flywheel architecture](assets/physical-ai-edge-flywheel.drawio.png)
 
