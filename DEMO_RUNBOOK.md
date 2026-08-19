@@ -19,24 +19,29 @@ Two ways to run this:
 
 ### The story you're telling (read this first)
 
-> **"An AI robot-brain that improves itself — on a device on my desk, and every
-> step of it governed."**
+> **"A governed, self-improving lifecycle for Physical AI at the edge — built on
+> Red Hat's platform."**
 >
 > A Jetson Thor runs a real world model. It watches itself work, throws out the
 > bad attempts *on the device*, ships only the good data to the cluster, which
-> retrains the model, signs it, and promotes it back — and you can *see* the model
-> get better before it's ever deployed to a fleet. That's the flywheel.
+> retrains, signs, and promotes a better model back — and you can *see* the
+> improvement before it's ever deployed to a fleet. **The model is NVIDIA's; the
+> loop that makes it deployable, improvable, and governed is the story.** That's
+> the flywheel.
 >
-> Five beats tell that arc: **(1)** it's real and on the device → **(2)** it
-> curates its own data → **(3)** training produces a measurably better model →
-> **(4)** you can see the improvement *before* deploying → **(5)** every promotion
-> is signed and GitOps-governed.
+> Six beats tell that arc: **(1)** why this exists (the edge lifecycle problem) →
+> **(2)** the device curates its own data on-device → **(3)** the platform triggers
+> retraining and produces a signed candidate → **(4)** you can measure it →
+> **(5)** you can *see* the improvement before deploying → **(6)** every promotion
+> is signed and GitOps-governed. Training is one orchestrated step in that loop —
+> not the point; the *enablement* is.
 >
 > **The one honest shortcut:** real model training takes ~30 minutes and a model
 > hot-swap takes ~5, which nobody wants to watch. So we run the *live* parts live
-> (the model, on-device curation), and for the training step we show the **real
-> artifacts a real run already produced** (the pipeline's PR, the tracked metrics,
-> the before/after prediction videos). Nothing is faked — it's time-compressed.
+> (the model, on-device curation, the governed promotion), and for the training
+> step we show the **real artifacts a real run already produced** (the pipeline's
+> PR, the tracked metrics, the before/after prediction videos). Nothing is faked —
+> it's time-compressed.
 
 ### Prerequisites — what you need before recording
 
@@ -77,15 +82,31 @@ in sequence — the demo never jumps around):
 
 ---
 
-### Beat 1 — "It's real, and it's on the device" (~45s)
+### Beat 1 — "Why this exists" (~45s)
 
-**Screen:** Dashboard. Point at the model badge (top): it reads **`cosmos3-edge-v1`**.
+**Screen:** you, or a title slide — *not* the empty dashboard yet. Set the frame
+before showing anything on screen.
 
-> "This is NVIDIA's Cosmos3-Edge — a 4-billion-parameter world model — running on
-> a Jetson Thor sitting on my desk. Not a cloud API. The entire stack was delivered
-> to it by GitOps with zero inbound connections to the device. Right now it's
-> running the **baseline** model — remember that, because we're about to watch the
-> system improve it."
+> "Physical AI — robots, autonomous machines — is moving to the edge, where the
+> hard problem isn't the model, it's everything *around* it: how do you get a model
+> onto a fleet of devices safely, watch how it does in the real world, improve it
+> from that experience, and roll the better version back out — without ever
+> shipping something unsigned or un-governed to a machine that moves in the
+> physical world?
+>
+> That lifecycle is what we've built on Red Hat's platform: a device that runs a
+> real world model at the edge, generates and quality-gates its own experience,
+> triggers retraining in the cluster, and promotes a signed, better model back to
+> the device — all through Git, all governed. The model here is NVIDIA's
+> Cosmos3-Edge; **our part is the self-improving, governed loop that makes it
+> deployable as a fleet.** Let me show you that loop closing."
+
+**Now** bring up the Dashboard. Point at the model badge (top): **`cosmos3-edge-v1`**.
+
+> "This is that world model — 4 billion parameters — running on a Jetson Thor on my
+> desk, not a cloud API. Everything on it was delivered by GitOps with zero inbound
+> connections. It's running the **baseline** model right now — hold onto that,
+> because we're about to watch the platform improve it."
 
 *(Optional 20-sec cutaway to the Argo CD tab: "everything on the device is synced
 from Git — this is the control plane.")*
@@ -109,27 +130,35 @@ Point at the **progress bar** climbing toward the training trigger, then click
 
 > "When enough good episodes accumulate, it trips a training run automatically."
 
-### Beat 3 — "Training produced a better model" (~45s) — *the honest time-compress*
+### Beat 3 — "The platform closes the loop, automatically" (~45s) — *the honest time-compress*
 
 **Screen:** switch to the **PR** tab.
 
-> "Here's where I'm compressing time. A real training run takes about half an hour
-> on a GPU that scales up from zero — you don't want to watch that. So this is the
-> **actual pull request a real run opened**: it took the curated data, retrained
-> the model, packaged it as a **signed** artifact, and proposed promoting it. Real
-> pipeline, real output — I'm just not making you wait for it live."
+> "When enough good data lands, the platform takes over on its own: it stands up a
+> GPU in the cluster, runs the training recipe, and — this is the part that matters
+> for putting robots in production — it **packages the result as a signed artifact
+> and opens a promotion request** for a human to approve. Here's the actual pull
+> request a real run produced. The training itself takes about half an hour, so I'm
+> not making you watch it — but nothing here is faked; this is the real output of
+> the loop. The value isn't that we trained a model; it's that the whole path from
+> field data to a governed, signed, promotable model happened without anyone
+> hand-carrying files around."
 
 Scroll the PR to show the changed model digest / the signed artifact reference.
 
-### Beat 4 — "...and you can measure it" (~45s, optional but strong)
+### Beat 4 — "...and it's tracked and traceable" (~45s, optional but strong)
 
 **Screen:** the **MLflow Compare** tab (`v1-base` vs `v2-500iter-graft`).
 
+> "Every candidate the loop produces is tracked — you can always answer 'which
+> model, trained on what, is running where.'"
+
 Point at exactly two numbers:
-1. **Training loss dropped** — `2.69 → 1.43` (~47%). "It actually learned."
+1. **Training loss dropped** — `2.69 → 1.43` (~47%). "The run converged."
 2. **Dream temporal stability** — `0.047` (v1) vs `0.018` (v2), ~61% smoother.
    "The new model's predictions are measurably more coherent — and in a second
-   you'll *see* that number."
+   you'll *see* that number." *(The digest here also ties the experiment to the
+   exact signed artifact deployed on the device.)*
 
 *(Plotting tips + what-the-NaNs-mean are in **§ Reference: the numbers & screens
 behind the beats** just below, if asked.)*
