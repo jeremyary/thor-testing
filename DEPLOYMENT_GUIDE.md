@@ -319,7 +319,40 @@ spec:
           - ServerSideApply=true
 ```
 
-`observability/` is the one exception: Perses/Tempo/the dashboard all run **on the hub itself**, not on Thor, so its ApplicationSet (`thor-testing-observability`) uses a plain `list` generator with a single `hub` element and targets `https://kubernetes.default.svc` in-cluster instead of the ACM cluster-decision generator above. Same `syncPolicy` (`automated: {prune: true, selfHeal: true}`, `CreateNamespace=true`/`ServerSideApply=true`). Not checked into `gitops/` as a YAML file, consistent with the other three ApplicationSets, which also exist only as live objects on the hub's `openshift-gitops` namespace (this doc is the source of truth for recreating any of them). See `DECISIONS.md` D028 for why it's shaped this way and the naming-collision incident to watch for when creating it (this hub is shared with other, unrelated projects — always check for an existing object with the intended name first).
+**Two directories are hub-targeted exceptions** — they run **on the hub itself**, not on Thor, so instead of the ACM cluster-decision generator above they use a plain `list` generator with a single `hub` element targeting `https://kubernetes.default.svc` in-cluster (same `syncPolicy`: `automated: {prune: true, selfHeal: true}`, `CreateNamespace=true`/`ServerSideApply=true`):
+
+- **`gitops/observability/`** → ApplicationSet `thor-testing-observability`, namespace `observability` (Perses/Tempo/dashboard).
+- **`gitops/hub-training/`** → ApplicationSet `thor-testing-hub-training`, namespace `vla-training` (the flywheel training-trigger `manifest-consumer`). Recreate it with:
+
+  ```yaml
+  apiVersion: argoproj.io/v1alpha1
+  kind: ApplicationSet
+  metadata:
+    name: thor-testing-hub-training
+    namespace: openshift-gitops
+  spec:
+    generators:
+      - list:
+          elements:
+            - name: hub
+    template:
+      metadata:
+        name: 'thor-testing-hub-training-{{name}}'
+      spec:
+        project: default
+        source:
+          repoURL: https://github.com/jeremyary/thor-testing.git
+          path: gitops/hub-training
+          targetRevision: main
+        destination:
+          server: https://kubernetes.default.svc
+          namespace: vla-training
+        syncPolicy:
+          automated: {prune: true, selfHeal: true}
+          syncOptions: [CreateNamespace=true, ServerSideApply=true]
+  ```
+
+These ApplicationSets are **not checked into `gitops/`** as YAML files — consistent with the edge ApplicationSets, they exist only as live objects in the hub's `openshift-gitops` namespace, and **this doc is the source of truth for recreating any of them**. See `DECISIONS.md` D028 for why they're shaped this way and the naming-collision incident to watch for: **this hub is shared with other, unrelated projects — always `oc get applicationset,application -n openshift-gitops <name>` to check for an existing object before creating anything, and keep the `thor-testing-`/`thor-` prefix.**
 
 ### 4.3 Secrets (not in Git)
 
@@ -362,13 +395,15 @@ oc create secret generic hub-kafka-ca --from-file=ca.crt=/tmp/hub-ca.crt -n flyw
 > `hub-kafka-ca` (mirrormaker2) sit on that path; either one missing breaks the
 > PR-opening step while leaving the on-device dashboard looking fine.
 >
-> **manifest-consumer is not Argo-managed.** Its manifest lives at
-> `gitops/hub-training/manifest-consumer.yaml` but no ApplicationSet tracks that
-> path — it is applied/scaled live in the `vla-training` namespace. Restoring it
-> after a rebuild is a manual `oc apply` + `oc scale deploy/manifest-consumer
-> -n vla-training --replicas=1`. It reads `episode-manifests` with
-> `auto.offset.reset=earliest` and auto-commit under group `hub-manifest-consumer`;
-> to skip a stale backlog, reset the group offset to latest before starting it.
+> **manifest-consumer offset behavior.** It reads `episode-manifests` with
+> `auto.offset.reset=earliest` and auto-commit under group `hub-manifest-consumer`.
+> To skip a stale backlog (e.g. after mirrormaker2 was down and then flushed a
+> burst of manifests), reset the group offset to latest before/while restarting it:
+> ```bash
+> oc exec -n fleet-ops fleet-fleet-brokers-0 -- bin/kafka-consumer-groups.sh \
+>   --bootstrap-server localhost:9092 --group hub-manifest-consumer \
+>   --topic episode-manifests --reset-offsets --to-latest --execute
+> ```
 
 ## 5. Cosmos3-Edge Inference (Phase 3)
 

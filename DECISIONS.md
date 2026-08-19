@@ -778,3 +778,44 @@ audience is not scrutinizing tuning methodology); the smoothness delta is intact
 
 **Files changed:** `dream-comparison/gen_dream.py` (new), `dream-comparison/README.md`,
 `dream-comparison/dream_diag_v2graft.mp4` (refreshed), `DECISIONS.md`.
+
+## D037: Restored flywheel outer-loop (two missing secrets) + brought manifest-consumer under GitOps
+
+**Context:** The flywheel's training trigger never opened a promotion PR despite the
+on-device dashboard looking healthy. Root cause was two **live-only** secrets that
+had gone missing (namespace/cluster churn), each silently breaking a different link
+in the outer loop:
+
+- `flywheel/hub-credentials` (MinIO S3 keys `s3-access-key`/`s3-secret-key`) —
+  sync-agent = `CreateContainerConfigError` → episodes never "sent" → progress bar
+  stuck.
+- `flywheel/hub-kafka-ca` (key `ca.crt`, sourced from the hub Strimzi
+  `fleet-cluster-ca-cert`) — mirrormaker2 = `ContainerCreating` forever → edge→hub
+  manifest mirror never ran → hub `manifest-consumer` never tripped → no PR.
+
+Both recreated live. When mirrormaker2 came up it flushed a ~46-manifest backlog and
+stampeded 4 KFP training runs at once; stopped them, cleared episode dirs, and reset
+the `hub-manifest-consumer` Kafka group offset to latest so the backlog is skipped.
+
+**Decision — brought `manifest-consumer` under GitOps.** It was live-only: its
+manifest sat at `gitops/hub-training/manifest-consumer.yaml` but no ApplicationSet
+tracked that path. Created ApplicationSet `thor-testing-hub-training` (hub-targeted
+`list`/`hub` pattern, same as `thor-testing-observability`, D028) → app
+`thor-testing-hub-training-hub`, adopting the deployment cleanly (git `replicas: 1`
+== live, no disruption). Collision-checked the name and confirmed no other Argo app
+targets `vla-training` before applying (D028's shared-hub lesson).
+
+**Not fixed (tracked as known risk, per operator decision):** the two secrets remain
+live-only (not Sealed/External Secrets), so a namespace rebuild will drop them again
+and re-break the outer loop. Documented in `DEPLOYMENT_GUIDE.md` §4.3 with explicit
+MISSING-SYMPTOM notes so the failure is diagnosable if it recurs.
+
+**Also:** rolled the device serving model back to **v1 (blue)** as the committed
+runbook start state (reverted the v2 promotion's replica/selector values in git),
+and reconciled all flywheel workloads to their GitOps demo-start state (producers
+robot-sim/dreamer at 0; curator/sync-agent/mirrormaker2/edge-kafka/dashboard at 1).
+
+**Files changed:** `DEPLOYMENT_GUIDE.md`, `DECISIONS.md`, and (earlier in-session)
+`gitops/vllm-cosmos3/{deployment,deployment-green,service}.yaml`. The
+`thor-testing-hub-training` ApplicationSet is a live hub object (documented in
+DEPLOYMENT_GUIDE §4.2, not checked into `gitops/`, per D028 convention).
