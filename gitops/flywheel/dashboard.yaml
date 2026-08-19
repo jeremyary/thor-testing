@@ -1035,7 +1035,7 @@ data:
           </div>
         </div>
         <div id="trigger-banner">
-          &#9889; Training threshold reached &mdash; Kueue queueing Reasoner SFT job on hub L40S &rarr; cosmos-framework training beginning
+          &#9889; Training threshold reached &mdash; Kueue queueing Vision SFT job on hub L40S &rarr; cosmos-framework training beginning
         </div>
       </div>
 
@@ -1043,16 +1043,22 @@ data:
       <div class="card" id="dream-card">
         <div class="card-header">
           <span class="card-title">&#10024; Dream Before Deploy</span>
+          <!-- Live-dreamer status indicator: hidden on the pinned-playback path
+               (buttons call playPinnedDream, not the live dreamer). Backend
+               /api/control/dreamer is retained for the manual live path
+               (oc scale dreamer) documented in DEMO_RUNBOOK.md. -->
           <div id="dream-dreamer-status" class="hidden running-indicator">
             <div class="dot-pulse"></div> Dreamer running
           </div>
         </div>
         <div id="dream-body">
           <div id="dream-annotation" class="annotation">
-            Forward Dynamics: real robot image + action trajectory &rarr; predicted arm motion.
-            Rendered on-device (Thor Blackwell GPU, ~2.6 s, real-time at 5 Hz).
-            No pre-rendered video &mdash; the world model computes this from scratch on Thor.
-            Compare v1 and v2 rollouts to see the flywheel&rsquo;s improvement.
+            Forward Dynamics: real robot image + action trajectory &rarr; predicted arm motion,
+            computed on-device by the Cosmos3-Edge world model (Thor Blackwell GPU).
+            These buttons play a pinned, curated v1-vs-v2 pair &mdash; genuine outputs of the
+            base and the real 500-iter fine-tuned models at identical params (256&times;256,
+            seed 42) &mdash; so the comparison is deterministic every run. Compare the two
+            rollouts to see the flywheel&rsquo;s improvement.
           </div>
           <div id="dream-videos">
 
@@ -1061,7 +1067,7 @@ data:
               <div class="dream-video-wrap v1" id="dream-wrap-v1">
                 <div class="dream-placeholder" id="dream-ph-v1">
                   <div class="icon">&#127775;</div>
-                  <div class="label">Generate the v1 dream<br>to see the baseline rollout</div>
+                  <div class="label">Click Dream v1<br>to play the baseline rollout</div>
                 </div>
                 <video class="dream-video" id="dream-v1" autoplay loop muted playsinline></video>
               </div>
@@ -1075,6 +1081,8 @@ data:
                           onclick="playPinnedDream('v1')">
                     &#127775; Dream v1
                   </button>
+                  <!-- Stop button only appears if the live dreamer is running
+                       (manual oc-scale path). Unused by the pinned buttons. -->
                   <button class="btn btn-red btn-sm hidden" id="btn-dream-stop"
                           onclick="controlDreamer('stop')">
                     &#9632; Stop
@@ -1089,7 +1097,7 @@ data:
                 <div class="dream-placeholder" id="dream-ph-v2">
                   <div class="icon" style="color:var(--txt3)">&#10024;</div>
                   <div class="label" style="color:var(--txt3)">
-                    Merge promotion PR<br>then generate v2 dream<br>to see the improvement
+                    Click Dream v2<br>to play the fine-tuned rollout
                   </div>
                 </div>
                 <video class="dream-video" id="dream-v2" autoplay loop muted playsinline></video>
@@ -1206,7 +1214,7 @@ data:
     evtSource.addEventListener('dream', e => {
       const d = JSON.parse(e.data);
       loadDream(d.version, d.file);
-      showToast('Dream ' + d.version + ' complete \u2014 Forward Dynamics rollout ready',
+      showToast('Dream ' + d.version + ' \u2014 Forward Dynamics rollout ready',
                 d.version === 'v2' ? 'toast-green' : 'toast-blue');
     });
 
