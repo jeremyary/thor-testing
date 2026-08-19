@@ -10,7 +10,14 @@ spec:
     plugin:
       kind: TempoDatasource
       spec:
-        directUrl: http://tempo-edge-traces-query-frontend.observability.svc:3200
+        # proxy (not directUrl): the Perses BACKEND fetches from the in-cluster
+        # Tempo service. directUrl makes the browser call svc:3200 directly,
+        # which is unreachable from a laptop -> "network error attempting to
+        # fetch resource" on every panel.
+        proxy:
+          kind: HTTPProxy
+          spec:
+            url: http://tempo-edge-traces-query-frontend.observability.svc:3200
   instanceSelector:
     matchLabels:
       app.kubernetes.io/name: edge-perses
