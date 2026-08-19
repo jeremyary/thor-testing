@@ -1037,7 +1037,6 @@ data:
           </div>
           <div id="prog-counts" style="color:var(--txt2)">
             <span id="c-total">0</span> captured &middot;
-            <span id="c-curated" style="color:var(--green)">0</span> curated &middot;
             <span id="c-rejected" style="color:var(--red)">0</span> rejected &middot;
             <span id="c-sent">0</span> sent
           </div>
@@ -1298,8 +1297,7 @@ data:
 
       // Counts
       const c = s.counts || {};
-      document.getElementById('c-total').textContent   = (c.raw||0)+(c.curated||0)+(c.rejected||0)+(c.sent||0);
-      document.getElementById('c-curated').textContent  = c.curated  || 0;
+      document.getElementById('c-total').textContent    = (c.raw||0)+(c.curated||0)+(c.rejected||0)+(c.sent||0);
       document.getElementById('c-rejected').textContent = c.rejected || 0;
       document.getElementById('c-sent').textContent     = c.sent     || 0;
 
