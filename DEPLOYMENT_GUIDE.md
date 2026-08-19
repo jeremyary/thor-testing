@@ -323,19 +323,52 @@ spec:
 
 ### 4.3 Secrets (not in Git)
 
-These secrets must be created manually on Thor's MicroShift before workloads deploy:
+These secrets must be created manually on Thor's MicroShift before workloads deploy.
+They are **not** GitOps-managed, so a namespace recreate / cluster rebuild will drop
+them and silently break the flywheel's outer loop — see the failure symptoms noted
+against each. (`KUBECONFIG=/var/lib/microshift/resources/kubeadmin/kubeconfig` for all.)
 
 ```bash
-# HuggingFace token for model downloads
-KUBECONFIG=/var/lib/microshift/resources/kubeadmin/kubeconfig \
+# HuggingFace token for model downloads (vllm ns)
 oc create secret generic hf-credentials --from-literal=token=$HF_TOKEN -n vllm
 
-# Hub credentials for flywheel sync-agent
-KUBECONFIG=/var/lib/microshift/resources/kubeadmin/kubeconfig \
+# Hub MinIO credentials for flywheel sync-agent (flywheel ns).
+# Keys MUST be s3-access-key / s3-secret-key (the sync-agent env references them).
+# Values are the hub MinIO root creds (see MINIO_ROOT_USER/PASSWORD on the hub
+# `minio` deployment in the robotics-data namespace).
+# MISSING SYMPTOM: sync-agent pod = CreateContainerConfigError ("secret
+# hub-credentials not found") -> episodes never leave Thor -> progress bar
+# stuck at 0/... (nothing "sent").
 oc create secret generic hub-credentials \
   --from-literal=s3-access-key=<minio-user> \
   --from-literal=s3-secret-key=<minio-password> -n flywheel
+
+# Hub Kafka cluster CA for mirrormaker2's TLS connection to the hub Kafka
+# external route (flywheel ns). Key MUST be ca.crt (mm2-config points
+# hub.ssl.truststore.location at /certs/ca.crt).
+# Source the CA from the hub Strimzi cluster-ca-cert secret:
+#   oc get secret fleet-cluster-ca-cert -n fleet-ops \
+#     -o jsonpath='{.data.ca\.crt}' | base64 -d > /tmp/hub-ca.crt   # (run against the HUB)
+# MISSING SYMPTOM: mirrormaker2 pod = ContainerCreating forever
+# ("MountVolume.SetUp failed ... secret hub-kafka-ca not found") -> edge->hub
+# manifest mirror never runs -> hub manifest-consumer never trips -> NO
+# promotion PR ever opens even though the on-device flywheel looks healthy.
+oc create secret generic hub-kafka-ca --from-file=ca.crt=/tmp/hub-ca.crt -n flywheel
 ```
+
+> **Trigger-chain dependency:** the flywheel's outer loop is
+> `sync-agent → edge Kafka → mirrormaker2 → hub Kafka → manifest-consumer →
+> Tekton/DSP trigger → promotion PR`. Both `hub-credentials` (sync-agent) and
+> `hub-kafka-ca` (mirrormaker2) sit on that path; either one missing breaks the
+> PR-opening step while leaving the on-device dashboard looking fine.
+>
+> **manifest-consumer is not Argo-managed.** Its manifest lives at
+> `gitops/hub-training/manifest-consumer.yaml` but no ApplicationSet tracks that
+> path — it is applied/scaled live in the `vla-training` namespace. Restoring it
+> after a rebuild is a manual `oc apply` + `oc scale deploy/manifest-consumer
+> -n vla-training --replicas=1`. It reads `episode-manifests` with
+> `auto.offset.reset=earliest` and auto-commit under group `hub-manifest-consumer`;
+> to skip a stale backlog, reset the group offset to latest before starting it.
 
 ## 5. Cosmos3-Edge Inference (Phase 3)
 
@@ -352,7 +385,11 @@ Reasoner vs Generator are separate container images — you cannot switch modes 
 
 ## 6. Data Flywheel (Phase 3 — brief)
 
-Three workloads in the `flywheel` namespace, defaulting to `replicas: 0`:
+Workloads in the `flywheel` namespace. GitOps-declared **demo-start replicas**:
+`robot-sim: 0` and `dreamer: 0` (producers — off until the demo's Start Flywheel
+scales robot-sim up), while `curator: 1`, `sync-agent: 1`, `mirrormaker2: 1`,
+`edge-kafka: 1`, and `dashboard: 1` run continuously (ready-but-idle plumbing).
+A fresh Argo sync reconciles to exactly this state.
 
 ### robot-sim
 Generates episodes at 1 Hz (5 ticks/episode) by calling Cosmos3-Edge. 30% failure injection rate. Writes episodes to `/var/lib/episodes/raw/`.
@@ -361,7 +398,10 @@ Generates episodes at 1 Hz (5 ticks/episode) by calling Cosmos3-Edge. 30% failur
 Watches raw episodes, scores them on heuristic quality signals (failure flag, latency budget, inference errors). Passes clean episodes to `/var/lib/episodes/curated/`, rejects to `/var/lib/episodes/rejected/`. No model-based scoring — Cosmos3 in omni mode can't do text scoring.
 
 ### sync-agent
-Uploads curated episodes to MinIO bucket `episodes-curated`, publishes JSON manifests to Kafka topic `episode-manifests`. Runs continuously, idles when no new curated data.
+Uploads curated episodes to MinIO bucket `episodes-curated`, publishes JSON manifests to the **edge** Kafka topic `episode-manifests`. Runs continuously, idles when no new curated data. Requires the `hub-credentials` secret (§4.3).
+
+### mirrormaker2
+Mirrors the `episode-manifests` topic **edge → hub** Kafka (Strimzi MM2, edge→hub direction only) over the hub's external TLS route. This is the bridge that lets the hub `manifest-consumer` see the device's manifests and trip the training trigger. Requires the `hub-kafka-ca` secret (§4.3); without it MM2 never starts and no promotion PR is ever opened.
 
 **Start/stop the flywheel:**
 ```bash
