@@ -901,7 +901,7 @@ data:
       <!-- SCENE -->
       <div class="card" id="scene-card">
         <div class="card-header">
-          <span class="card-title">Scene / Frame</span>
+          <span class="card-title">Input Frame</span>
           <span id="scene-tag" class="tag">waiting</span>
         </div>
         <div class="card-body">
@@ -918,19 +918,14 @@ data:
           </div>
           <div class="annotation" style="margin-top:4px;font-size:10px">
             Real 256&times;256 BridgeData2 frame (WidowX arm, UC Berkeley RAIL).
-            This image is sent to the Action Policy as visual conditioning.
-             The Image&rarr;Video call generates a short clip from this conditioning frame.
           </div>
         </div>
       </div>
 
-      <!-- GENERATOR OUTPUT (D031) -->
+      <!-- STEP 1: Generate plan video + action policy (D031) -->
       <div class="card" id="generator-card">
         <div class="card-header">
-          <span class="card-title">Generator Output</span>
-          <span class="annotation" style="font-size:10px">
-             Cosmos3-Edge Generator: Image&rarr;Video (256&times;256) + Action Policy (DROID)
-          </span>
+          <span class="card-title">1 &middot; Generate "plan" video and action policy from still image + action description</span>
         </div>
         <div class="card-body" id="generator-body">
           <div id="gen-empty" style="color:var(--txt3);font-size:12px;padding:30px 0;text-align:center">
@@ -1042,7 +1037,7 @@ data:
       <!-- DREAM COMPARISON (HERO) -->
       <div class="card" id="dream-card">
         <div class="card-header">
-          <span class="card-title">&#10024; Dream Before Deploy</span>
+          <span class="card-title">2 &middot; Forward Dynamics prediction based on the plan + action policy above</span>
           <!-- Live-dreamer status indicator: hidden on the pinned-playback path
                (buttons call playPinnedDream, not the live dreamer). Backend
                /api/control/dreamer is retained for the manual live path
@@ -1066,10 +1061,10 @@ data:
             <div class="dream-panel">
               <div class="dream-video-wrap v1" id="dream-wrap-v1">
                 <div class="dream-placeholder" id="dream-ph-v1">
-                  <div class="icon">&#127775;</div>
-                  <div class="label">Click Dream v1<br>to play the baseline rollout</div>
+                  <div class="icon">&#9654;</div>
+                  <div class="label">Press Play v1<br>for the baseline rollout</div>
                 </div>
-                <video class="dream-video" id="dream-v1" autoplay loop muted playsinline></video>
+                <video class="dream-video" id="dream-v1" loop muted playsinline></video>
               </div>
               <div class="dream-meta">
                 <div>
@@ -1079,7 +1074,7 @@ data:
                 <div class="dream-controls">
                   <button class="btn btn-blue btn-sm" id="btn-dream-v1"
                           onclick="playPinnedDream('v1')">
-                    &#127775; Dream v1
+                    &#9654; Play v1
                   </button>
                   <!-- Stop button only appears if the live dreamer is running
                        (manual oc-scale path). Unused by the pinned buttons. -->
@@ -1095,12 +1090,12 @@ data:
             <div class="dream-panel">
               <div class="dream-video-wrap v2" id="dream-wrap-v2">
                 <div class="dream-placeholder" id="dream-ph-v2">
-                  <div class="icon" style="color:var(--txt3)">&#10024;</div>
+                  <div class="icon" style="color:var(--txt3)">&#9654;</div>
                   <div class="label" style="color:var(--txt3)">
-                    Click Dream v2<br>to play the fine-tuned rollout
+                    Press Play v2<br>for the fine-tuned rollout
                   </div>
                 </div>
-                <video class="dream-video" id="dream-v2" autoplay loop muted playsinline></video>
+                <video class="dream-video" id="dream-v2" loop muted playsinline></video>
               </div>
               <div class="dream-meta">
                 <div>
@@ -1110,7 +1105,7 @@ data:
                 <div class="dream-controls">
                   <button class="btn btn-gold btn-sm" id="btn-dream-v2"
                           onclick="playPinnedDream('v2')">
-                    &#10024; Dream v2
+                    &#9654; Play v2
                   </button>
                 </div>
               </div>
@@ -1212,9 +1207,14 @@ data:
     });
 
     evtSource.addEventListener('dream', e => {
+      // A live dreamer run (manual oc-scale path) produced a new file. Don't
+      // auto-play -- just make it the file the Play button will use, and tell
+      // the user it's ready to play.
       const d = JSON.parse(e.data);
-      loadDream(d.version, d.file);
-      showToast('Dream ' + d.version + ' \u2014 Forward Dynamics rollout ready',
+      window._dreamFiles = window._dreamFiles || {};
+      window._dreamFiles[d.version] = d.file;
+      dreamLoaded[d.version] = null;   // force reload of the new file on next Play
+      showToast('Rollout ' + d.version + ' ready \u2014 press Play ' + d.version,
                 d.version === 'v2' ? 'toast-green' : 'toast-blue');
     });
 
@@ -1363,10 +1363,11 @@ data:
         }
       }
 
-      // Dreams
-      const dr_st = s.dreams || {};
-      if (dr_st.v1) loadDream('v1', dr_st.v1);
-      if (dr_st.v2) loadDream('v2', dr_st.v2);
+      // Dreams: intentionally NOT auto-loaded here. The Play v1/v2 buttons
+      // are the trigger (playPinnedDream) so the rollouts stay on a placeholder
+      // until the user explicitly presses Play. We only stash the available
+      // filenames for the buttons to use.
+      window._dreamFiles = s.dreams || {};
 
       // Timestamp
       document.getElementById('sb-ts').textContent =
@@ -1376,43 +1377,58 @@ data:
     // ---- Dream loader -------------------------------------------------------
     const dreamLoaded = {v1: null, v2: null};
 
-    function loadDream(ver, file) {
-      if (dreamLoaded[ver] === file) return;
-      dreamLoaded[ver] = file;
+    function loadDream(ver, file, autoPlay) {
       const vid  = document.getElementById('dream-' + ver);
       const ph   = document.getElementById('dream-ph-' + ver);
       const wrap = document.getElementById('dream-wrap-' + ver);
-      vid.src = '/api/dream/' + file + '?t=' + Date.now();
-      vid.load();
-      vid.onloadeddata = () => {
+      // Reload only if the source changed; otherwise just replay from start.
+      if (dreamLoaded[ver] !== file) {
+        dreamLoaded[ver] = file;
+        vid.src = '/api/dream/' + file + '?t=' + Date.now();
+        vid.load();
+        vid.onloadeddata = () => {
+          vid.classList.add('loaded');
+          ph.classList.add('hidden');
+          wrap.classList.add('has-video');
+          if (ver === 'v2') {
+            document.getElementById('dream-smooth-v2').textContent = 'Post fine-tuning rollout';
+          }
+          if (autoPlay) { vid.currentTime = 0; vid.play(); }
+        };
+      } else if (autoPlay) {
+        // Already loaded -- restart playback from the first frame.
         vid.classList.add('loaded');
         ph.classList.add('hidden');
         wrap.classList.add('has-video');
-        if (ver === 'v2') {
-          document.getElementById('dream-smooth-v2').textContent = 'Post fine-tuning rollout';
-        }
-      };
+        vid.currentTime = 0;
+        vid.play();
+      }
     }
 
-    // ---- Pinned showcase dream playback -------------------------------------
-    // The Dream v1/v2 buttons play the pinned, curated comparison pair
+    // ---- Pinned showcase rollout playback -----------------------------------
+    // The Play v1/v2 buttons play the pinned, curated comparison pair
     // (zzz-showcase-cosmos3-edge-v{1,2}.mp4 on Thor's /var/lib/dreams,
     // immutable) via the same _dreams() [-1] pick the status snapshot uses.
     // Deterministic: no live GPU dreamer run, same rollout every demo.
+    // Videos do NOT autoplay -- pressing Play is the explicit trigger.
     async function playPinnedDream(ver) {
       const btnId = ver === 'v2' ? 'btn-dream-v2' : 'btn-dream-v1';
       setLoading(btnId, true);
       try {
-        const r = await fetch('/api/status');
-        const s = await r.json();
-        const file = (s.dreams || {})[ver];
+        // Prefer the filenames stashed by the status stream; fall back to a fetch.
+        let file = (window._dreamFiles || {})[ver];
+        if (!file) {
+          const r = await fetch('/api/status');
+          const s = await r.json();
+          window._dreamFiles = s.dreams || {};
+          file = window._dreamFiles[ver];
+        }
         if (file) {
-          dreamLoaded[ver] = null;   // force reload even if already shown
-          loadDream(ver, file);
-          showToast('Dream ' + ver + ' \u2014 Forward Dynamics rollout',
+          loadDream(ver, file, true);   // true = play from first frame on load
+          showToast('Playing ' + ver + ' \u2014 Forward Dynamics rollout',
                     ver === 'v2' ? 'toast-green' : 'toast-blue');
         } else {
-          showToast('No ' + ver + ' dream available', '');
+          showToast('No ' + ver + ' rollout available', '');
         }
       } finally {
         setLoading(btnId, false);

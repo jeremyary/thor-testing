@@ -137,12 +137,12 @@ data:
         parts = [
             text_part("model", model_name),
             text_part("prompt", "A robotic arm manipulating objects on a table"),
-            text_part("size", "320x192"),
+            text_part("size", "256x256"),          # match square frame (D034-C); 320x192 degrades
             text_part("num_frames", str(num_frames)),
             text_part("fps", "5"),
             text_part("num_inference_steps", str(DIFFUSION_STEPS)),
-            text_part("guidance_scale", "1.0"),
-            text_part("flow_shift", "3.0"),
+            text_part("guidance_scale", "1.0"),      # FD is action-conditioned; CFG has little effect
+            text_part("flow_shift", "7.0"),          # best late-frame coherence (D036)
             text_part("seed", str(int(time.time()) % 999999)),
             text_part("extra_params", extra_params),
             file_part,

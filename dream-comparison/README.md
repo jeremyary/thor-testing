@@ -1,9 +1,11 @@
 # Dream comparison assets (canonical)
 
 The matched "dream before deploy" pair used by the demo dashboard and the RHOAI
-MLflow experiment. Both are Forward Dynamics rollouts generated at **identical
-params — 256×256, seed 42, `pick_place` BridgeData2 frame + the `good` 16-step
-action chunk** — so the *only* variable is the model.
+MLflow experiment. Both are Forward Dynamics rollouts from the same **256×256,
+seed 42, `pick_place` BridgeData2 frame + the `good` 16-step action chunk**,
+each generated against its own model checkpoint.
+
+Regenerate either with `gen_dream.py` on Thor (see "Re-pinning" below).
 
 | File | What | Model | Signed modelcar digest |
 |------|------|-------|------------------------|
@@ -13,7 +15,7 @@ action chunk** — so the *only* variable is the model.
 | `loss_curve.json` | 50-pt training loss window from `run500.log` | v2 | — |
 
 `dream_temporal_stability` (mean grayscale frame-to-frame diff, lower = smoother):
-base **0.044** vs v2 **0.017** (~61% smoother).
+base **0.047** vs v2 **0.018** (~61% smoother).
 
 On Thor these are pinned immutable at
 `/var/lib/dreams/zzz-showcase-cosmos3-edge-v{1,2}.mp4` and served by the dashboard
@@ -22,3 +24,19 @@ Dream v1/v2 buttons. See `DEMO_RUNBOOK.md` (§ Reproducing the Pinned Dreams,
 
 > **Resolution matters:** generate at 256×256 to match the square frame. The
 > dreamer's default 320×192 produces visibly degraded, incoherent rollouts (D034-C).
+
+## Re-pinning
+
+`gen_dream.py` (run on Thor) regenerates a dream deterministically against
+whichever checkpoint vLLM-Omni is currently serving. To update a pinned file:
+
+```bash
+# 1. ensure the intended checkpoint is served (blue=base / green=v2)
+# 2. generate
+python3 gen_dream.py v2            # -> /tmp/dream_v2.mp4
+# 3. pin it (path is immutable; unlock, replace, re-lock)
+chattr -i /var/lib/dreams/zzz-showcase-cosmos3-edge-v2.mp4
+cp /tmp/dream_v2.mp4 /var/lib/dreams/zzz-showcase-cosmos3-edge-v2.mp4
+chmod 444 /var/lib/dreams/zzz-showcase-cosmos3-edge-v2.mp4
+chattr +i /var/lib/dreams/zzz-showcase-cosmos3-edge-v2.mp4
+```

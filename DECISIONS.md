@@ -750,3 +750,31 @@ name (candidates: `wam-training`, `cosmos3-flywheel`, `physical-ai-training`).
 Tracked as tech debt, not scheduled.
 
 **Files changed:** `DECISIONS.md`.
+
+## D036: Re-pinned demo v2 dream at flow_shift 7.0 (better late-frame coherence)
+
+**Context:** The pinned v2 "dream" showed temporal degradation in the back third
+of the rollout (arm/gripper smearing), making the Forward Dynamics centerpiece
+look weaker than the Generator Output panel next to it.
+
+**Finding (empirical, on Thor):** For action-conditioned Forward Dynamics,
+`guidance_scale`, `num_inference_steps`, and prompt/negative-prompt changes have
+little visible effect (FD is driven by the action chunk, not the text prompt).
+`flow_shift` is the lever that actually affects late-frame coherence: sweeping
+1.0→3.0→5.0→7.0→12.0 showed 7.0 as the cleanest faithful result. The original
+pair used 3.0.
+
+**Decision:** Re-pinned v2 at `flow_shift=7.0` (kept everything else: 256×256,
+seed 42, `pick_place` frame, `good` chunk). **v1 left unchanged at flow_shift 3.0**
+— we kept the existing base-model v1 rather than take serving down for a re-gen.
+Consequence: the pinned pair now differs by model **and** flow_shift, superseding
+D034-D's "only the model varies" property. Acceptable for a demo showpiece (the
+audience is not scrutinizing tuning methodology); the smoothness delta is intact
+(temporal-stability base ~0.047 vs v2 ~0.018).
+
+**Reproducibility:** generation is now a tracked script, `dream-comparison/gen_dream.py`
+(supersedes the Thor-local `gen_dream_fixed.py` cleaned up in D034), with
+`flow_shift`/`steps` parameterized and re-pinning steps in `dream-comparison/README.md`.
+
+**Files changed:** `dream-comparison/gen_dream.py` (new), `dream-comparison/README.md`,
+`dream-comparison/dream_diag_v2graft.mp4` (refreshed), `DECISIONS.md`.
