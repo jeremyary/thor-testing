@@ -215,6 +215,22 @@ data:
                 "curation_verdict":  curation_verdict,
             },
             "dreams": d,
+            # Full recent-episode list (authoritative, mtime-sorted). The
+            # frontend rebuilds the curation log from this every tick, so the
+            # log is robust to the fast curated->sent file moves and to any
+            # dropped 'episode' SSE events (the old per-file broadcast was
+            # lossy under rapid churn).
+            "log": [
+                {
+                    "episode_id":      e.get("episode_id", ""),
+                    "verdict":         e.get("_verdict", "pass"),
+                    "curation_score":  e.get("curation_score", 0),
+                    "curation_reason": e.get("curation_reason", ""),
+                    "scene":           e.get("scene", ""),
+                    "ts":              e.get("_mtime", 0),
+                }
+                for e in _episode_log(30)
+            ],
             "ts": time.time(),
         }
 
@@ -1191,19 +1207,23 @@ data:
       applyStatus(s);
     });
 
+    // The curation log is driven authoritatively by the 'status' event's
+    // s.log list (rebuilt via renderLog in applyStatus), which is reliable
+    // under the fast curated->sent file moves. The legacy per-episode SSE
+    // events remain as an optional early hint but are no longer the source
+    // of truth.
     evtSource.addEventListener('episode', e => {
       const ep = JSON.parse(e.data);
-      prependLogEntry(ep);
+      prependLogEntry(ep);   // best-effort immediate feedback; reconciled by renderLog
     });
 
     evtSource.addEventListener('log_init', e => {
       const eps = JSON.parse(e.data);
-      logEntries = [];
-      document.getElementById('log-body').innerHTML = '';
-      eps.reverse().forEach(ep => {
+      eps.forEach(ep => {
         ep.verdict = ep._verdict || ep.verdict || 'pass';
-        prependLogEntry(ep);
+        if (ep.ts == null) ep.ts = ep._mtime || 0;   // normalize for renderLog's sort
       });
+      renderLog(eps);   // initial paint; renderLog sorts newest-first by ts
     });
 
     evtSource.addEventListener('dream', e => {
@@ -1371,6 +1391,9 @@ data:
       // filenames for the buttons to use.
       window._dreamFiles = s.dreams || {};
 
+      // Curation log (authoritative rebuild from the status snapshot)
+      if (s.log) renderLog(s.log);
+
       // Timestamp
       document.getElementById('sb-ts').textContent =
         new Date().toLocaleTimeString();
@@ -1508,6 +1531,52 @@ data:
       const pol = ep.policy || {};
       const s = ep.avg_smoothness || pol.smoothness || 0;
       return `I2V: ${gen.status || '?'} (${((gen.image_size||0)/1024).toFixed(0)}KB), Policy: ${pol.status || '?'} (smoothness ${s.toFixed(3)})`;
+    }
+
+    // Authoritative log renderer: rebuilds the scrollable list from the
+    // status snapshot's episode list (newest first). Only re-renders when the
+    // set of episode ids actually changes, so it won't clobber a user's
+    // click-to-expand state on every 3s tick.
+    let _logSig = null;
+    function renderLog(entries) {
+      if (!Array.isArray(entries)) return;
+      // newest first (backend sorts newest-first already; keep defensive)
+      const list = [...entries].sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, MAX_LOG);
+      const sig = list.map(e => e.episode_id).join('|');
+      if (sig === _logSig) return;   // nothing changed
+      _logSig = sig;
+
+      const body = document.getElementById('log-body');
+      if (!list.length) {
+        body.innerHTML = '<div id="log-empty" style="color:var(--txt3);text-align:center;padding:12px 0;font-size:11px">Episodes will appear here once the flywheel starts</div>';
+        return;
+      }
+      body.innerHTML = '';
+      for (const ep of list) body.appendChild(buildLogEntry(ep));
+      if (autoScroll) body.scrollTop = 0;
+    }
+
+    // Build a single log-entry node (shared by renderLog + prependLogEntry).
+    function buildLogEntry(ep) {
+      const verdict = ep.verdict || ep._verdict || 'pass';
+      const score   = ep.curation_score || 0;
+      const ts      = ep.ts ? new Date(ep.ts * 1000).toLocaleTimeString() : '--';
+      const div = document.createElement('div');
+      div.className = 'log-entry ' + verdict;
+      div.innerHTML = `
+        <div class="log-main">
+          <span class="log-time">${ts}</span>
+          <span class="log-verdict ${verdict}">${verdict === 'pass' ? '&#10003; PASS' : '&#10007; REJECT'}</span>
+          <span class="log-id">${(ep.episode_id||'').substring(0,8)}</span>
+          <span class="log-score ${scoreClass(score)}">${score.toFixed(3)}</span>
+          <span class="log-scene">${(ep.scene||'').replace(/_/g,' ')}</span>
+        </div>
+        <div class="log-reason ${logAnnotationsOn ? 'show' : ''}">${reasonAnnotation(ep)}</div>`;
+      div.style.cursor = 'pointer';
+      div.addEventListener('click', () => {
+        div.querySelector('.log-reason').classList.toggle('show');
+      });
+      return div;
     }
 
     function prependLogEntry(ep) {
