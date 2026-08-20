@@ -1191,6 +1191,19 @@ _Opened automatically by the cosmos3_finetune_pipeline (cosmos-framework Vision 
         branch=branch_name,
     )
 
+    # Flip the service selector from blue -> green so traffic actually reaches
+    # the running pod. Without this the service has no endpoints (connection refused).
+    svc_file = "gitops/vllm-cosmos3/service.yaml"
+    svc_content = repo.get_contents(svc_file, ref=branch_name)
+    svc_yaml = svc_content.decoded_content.decode()
+    repo.update_file(
+        svc_file,
+        f"promote: service selector blue->green (route traffic to {model_version})",
+        svc_yaml.replace("color: blue", "color: green", 1),
+        svc_content.sha,
+        branch=branch_name,
+    )
+
     pr = repo.create_pull(
         title=f"[promote] cosmos3-edge {model_version}",
         body=pr_body,
